@@ -70,4 +70,5 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/transfers-history', [FundTransferController::class, 'index']); // سجل جميع التحويلات
         
     });
+    Route::post('/update-fcm-token', [AuthController::class, 'updateFcmToken']);
 });

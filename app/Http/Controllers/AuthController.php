@@ -114,4 +114,23 @@ class AuthController extends Controller
             'user' => $user
         ], 200);
     }
+    // تحديث رمز الإشعارات (FCM Token) لجهاز المستخدم
+    public function updateFcmToken(Request $request)
+    {
+        $request->validate([
+            'fcm_token' => 'required|string',
+        ], [
+            // تذكر القاعدة رقم 7 من وثيقة المشروع: رسائل التحقق يجب أن تكون بالعربية
+            'fcm_token.required' => 'رمز الإشعارات مطلوب.',
+            'fcm_token.string' => 'صيغة رمز الإشعارات غير صحيحة.'
+        ]);
+
+        $user = $request->user();
+        $user->fcm_token = $request->fcm_token;
+        $user->save();
+
+        return response()->json([
+            'message' => 'تم تحديث رمز الإشعارات بنجاح'
+        ], 200);
+    }
 }
