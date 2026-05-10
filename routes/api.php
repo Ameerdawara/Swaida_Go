@@ -10,6 +10,7 @@ use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\AppFundController;
 use App\Http\Controllers\CharityFundController;
 use App\Http\Controllers\FundTransferController;
+use App\Http\Controllers\SettingController;
 
 /*
 |--------------------------------------------------------------------------
@@ -71,4 +72,15 @@ Route::middleware('auth:sanctum')->group(function () {
         
     });
     Route::post('/update-fcm-token', [AuthController::class, 'updateFcmToken']);
+    // مسار جلب العمولة (متاح للمستخدمين والمدير لكي يعرضها التطبيق أثناء الدفع)
+    
+    Route::get('/settings/commission', [SettingController::class, 'getCommission']);
+
+    // مسارات المدير (Admin Only)
+    Route::middleware('IsAdmin')->prefix('admin')->group(function () {
+        
+        // مسار تعديل العمولة (خاص بالمدير فقط)
+        Route::post('/settings/commission', [SettingController::class, 'updateCommission']);
+        
+    });
 });
