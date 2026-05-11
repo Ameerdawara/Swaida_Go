@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Payment;
 use App\Models\AppFund;
+use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -14,7 +15,7 @@ class PaymentController extends Controller
     public function initiate(Request $request)
     {
         $request->validate([
-            'months' => 'required|array', // مصفوفة بأرقام الأشهر المراد دفعها (مثال: [1, 2, 3])[cite: 1]
+            'months' => 'required|array',
             'months.*' => 'integer|min:1|max:12'
         ]);
 
@@ -25,33 +26,41 @@ class PaymentController extends Controller
             return response()->json(['message' => 'لا يوجد اشتراك نشط'], 404);
         }
 
-        // جلب الدفعات المطلوبة والتأكد أنها غير مدفوعة
+        // 1. جلب الدفعات المستحقة
         $payments = Payment::where('subscription_id', $subscription->id)
             ->whereIn('month_number', $request->months)
             ->whereNull('paid_at')
             ->get();
 
         if ($payments->isEmpty()) {
-            return response()->json(['message' => 'لم يتم العثور على دفعات مستحقة للأشهر المحددة'], 400);
+            return response()->json(['message' => 'لم يتم العثور على دفعات مستحقة'], 400);
         }
 
-        $total_amount = $payments->sum('amount');
-        $payment_ids = $payments->pluck('id')->toArray();
+        // 2. حساب المبلغ الأساسي (مثلاً 50 دولار)
+        $baseAmount = $payments->sum('amount');
 
-        // هُنا نقوم بالتخاطب مع PaymentGatewayService (Paddle / Stripe)[cite: 1]
-        // في هذه المرحلة سنقوم بمحاكاة (Mock) للرابط الخاص ببوابة الدفع
+        // 3. جلب نسبة العمولة من الإعدادات (مثلاً 5%)
+        $setting = Setting::first();
+        $commissionPercentage = $setting ? $setting->commission_percentage : 0;
+
+        // 4. تطبيق المعادلة: (المبلغ + النسبة المئوية + 0.5 ثابتة)
+        $commissionAmount = $baseAmount * ($commissionPercentage / 100);
+        $fixedFee = 0.5;
         
-        $mock_checkout_url = "https://checkout.paddle.com/mock-session-12345";
-        $mock_session_id = "session_12345_" . uniqid();
+        $totalToPay = $baseAmount + $commissionAmount + $fixedFee;
 
-        // يمكنك تخزين $mock_session_id في الدفعات أو في جدول وسيط لربط الـ Webhook لاحقاً
-
+        // 5. تجهيز بيانات الدفع للإرسال
         return response()->json([
-            'message' => 'تم إنشاء جلسة الدفع',
-            'checkout_url' => $mock_checkout_url,
-            'session_id' => $mock_session_id,
-            'total_amount' => $total_amount,
-            'payment_ids' => $payment_ids // نحتفظ بها لتحديثها عند نجاح الدفع
+            'message' => 'تم حساب إجمالي الرسوم',
+            'details' => [
+                'base_amount' => round($baseAmount, 2),        // المبلغ الأصلي
+                'commission' => round($commissionAmount, 2),  // قيمة النسبة المئوية
+                'fixed_fee' => $fixedFee,                     // 0.5
+                'total_to_pay' => round($totalToPay, 2)       // المبلغ النهائي المطلوب دفعه
+            ],
+            'payment_ids' => $payments->pluck('id'),
+            // هنا يوضع رابط بوابة الدفع بعد تمرير $totalToPay لها
+            'checkout_url' => "https://checkout.example.com/pay?amount=" . $totalToPay 
         ], 200);
     }
 
