@@ -8,9 +8,67 @@ use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Http;
 
 class PaymentController extends Controller
 {
+
+    private function createPaddleCheckout(float $amount, array $paymentIds, int $userId): string
+    {
+        $isSandbox = config('services.paddle.env', 'sandbox') === 'sandbox';
+        $baseUrl   = $isSandbox
+            ? 'https://sandbox-api.paddle.com'
+            : 'https://api.paddle.com';
+
+        $response = Http::withHeaders([
+                'Authorization' => config('services.paddle.secret_key'),
+                'Content-Type'  => 'application/json',
+            ])
+            ->post("{$baseUrl}/transactions", [
+                'items' => [[
+                    'price' => [
+                        'description' => 'رسوم الاشتراك الشهري',
+                        'unit_price'  => ['amount' => (string)round($amount * 100), 'currency_code' => 'USD'],
+                        'tax_mode'    => 'exclusive',
+                    ],
+                    'quantity' => 1,
+                ]],
+                'custom_data' => [
+                    'payment_ids' => $paymentIds,
+                    'user_id'     => $userId,
+                ],
+                'success_url' => url('/payment/success?session_id={checkout.id}'),
+                'cancel_url'  => url('/payment/cancel'),
+            ]);
+
+        // تسجيل الاستجابة الكاملة لتسهيل التشخيص
+        \Illuminate\Support\Facades\Log::info('Paddle API Response', [
+            'status' => $response->status(),
+            'body'   => $response->json(),
+        ]);
+
+        if (!$response->successful()) {
+            throw new \Exception(
+                'فشل الاتصال بـ Paddle: ' . $response->status() . ' — ' . $response->body()
+            );
+        }
+
+        $json = $response->json();
+
+        // Paddle يرجع رابط الـ checkout في: data.checkout.url
+        // وأحياناً في: data.url — نجرب الاثنين
+        $checkoutUrl = $json['data']['checkout']['url']
+            ?? $json['data']['url']
+            ?? null;
+
+        if (!$checkoutUrl) {
+            throw new \Exception(
+                'لم يتم الحصول على رابط الدفع من Paddle. الاستجابة: ' . json_encode($json)
+            );
+        }
+
+        return $checkoutUrl;
+    }
     // تهيئة جلسة الدفع (تُستدعى من تطبيق الـ Flutter)
     public function initiate(Request $request)
     {
@@ -46,8 +104,21 @@ class PaymentController extends Controller
         // 4. تطبيق المعادلة: (المبلغ + النسبة المئوية + 0.5 ثابتة)
         $commissionAmount = $baseAmount * ($commissionPercentage / 100);
         $fixedFee = 0.5;
-        
+
         $totalToPay = $baseAmount + $commissionAmount + $fixedFee;
+\Illuminate\Support\Facades\Log::info('Paddle Key', ['key' => config('services.paddle.secret_key')]);
+        try {
+            $checkoutUrl = $this->createPaddleCheckout(
+                amount: $totalToPay,
+                paymentIds: $payments->pluck('id')->toArray(),
+                userId: $user->id
+            );
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Paddle Checkout Error', ['error' => $e->getMessage()]);
+            return response()->json([
+                'message' => 'فشل إنشاء جلسة الدفع: ' . $e->getMessage(),
+            ], 500);
+        }
 
         // 5. تجهيز بيانات الدفع للإرسال
         return response()->json([
@@ -60,7 +131,9 @@ class PaymentController extends Controller
             ],
             'payment_ids' => $payments->pluck('id'),
             // هنا يوضع رابط بوابة الدفع بعد تمرير $totalToPay لها
-            'checkout_url' => "https://checkout.example.com/pay?amount=" . $totalToPay 
+            'checkout_url' => $checkoutUrl,
+            'total_amount' => round($totalToPay, 2),
+            'months'       => $request->months,
         ], 200);
     }
 
@@ -69,10 +142,25 @@ class PaymentController extends Controller
     {
         // 1. يجب التحقق من توقيع البوابة (Signature Verification) أولاً لضمان الأمان[cite: 1]
         // سنفترض أن التوقيع صحيح في هذا الكود المبدئي
+        $signature = $request->header('Paddle-Signature');
+        $body      = $request->getContent();
 
-        $payment_ids = $request->input('payment_ids'); // يتم إرسالها ضمن الـ Metadata من البوابة
-        $gateway_ref = $request->input('transaction_id'); // رقم المعاملة من البوابة
-
+        // Paddle يرسل توقيع HMAC-SHA256
+        $parts = [];
+foreach (explode(';', $signature) as $part) {
+    [$k, $v] = explode('=', $part, 2);
+    $parts[$k] = $v;
+}
+$ts = $parts['ts'] ?? '';
+$h1 = $parts['h1'] ?? '';
+$signed = $ts . ':' . $body;
+$expected = hash_hmac('sha256', $signed, config('services.paddle.secret_key'));
+if (!hash_equals($expected, $h1)) {
+    return response()->json(['message' => 'توقيع غير صحيح'], 401);
+}
+        // ✅ صحيح — Paddle يرسل البيانات داخل data.custom_data
+        $payment_ids = $request->input('data.custom_data.payment_ids');
+        $gateway_ref = $request->input('data.id');
         if (!$payment_ids || !is_array($payment_ids)) {
             return response()->json(['message' => 'بيانات غير مكتملة'], 400);
         }
@@ -107,7 +195,6 @@ class PaymentController extends Controller
             DB::commit();
 
             return response()->json(['message' => 'تم معالجة الدفع بنجاح وتحديث الصندوق'], 200);
-
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json(['message' => 'فشل معالجة الدفع', 'error' => $e->getMessage()], 500);

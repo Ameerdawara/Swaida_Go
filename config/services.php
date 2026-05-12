@@ -27,7 +27,11 @@ return [
         'secret' => env('AWS_SECRET_ACCESS_KEY'),
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
-
+    'paddle' => [
+    'secret_key' => env('PADDLE_SECRET_KEY'),
+    'public_key' => env('PADDLE_PUBLIC_KEY'),
+    'env'        => env('PADDLE_ENV', 'sandbox'),
+    ],
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
