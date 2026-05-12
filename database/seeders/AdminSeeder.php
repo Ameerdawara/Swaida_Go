@@ -16,10 +16,11 @@ class AdminSeeder extends Seeder
     {
         User::create([
             'full_name' => 'Anas Admin',             // اسم المدير
-            'email' => 'admin@swaida-go.com',         // البريد الإلكتروني للدخول
+            'email' => 'admin@gmail.com',         // البريد الإلكتروني للدخول
             'phone' => '0930000000',                  // رقم الهاتف
             'password' => Hash::make('Anas@2026'),   // كلمة المرور (تأكد من تغييرها لاحقاً)
-            'role' => 'admin',                        // الصلاحية: مدير
+            'role' => 'admin',
+            'email_verified_at' => Carbon::now(),     // الصلاحية: مدير
             'phone_verified_at' => Carbon::now(),     // جعله موثقاً فوراً
             'created_at' => Carbon::now(),
             'updated_at' => Carbon::now(),
