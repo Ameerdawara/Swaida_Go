@@ -2,58 +2,54 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Database\Factories\UserFactory;
+use Illuminate\Contracts\Auth\MustVerifyEmail; // ← تفعيل الواجهة
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;             // ← مطلوب لـ Sanctum
 
-class User extends Authenticatable
+class User extends Authenticatable implements MustVerifyEmail
 {
     /** @use HasFactory<UserFactory> */
-    use HasFactory, Notifiable;
+    use HasFactory, Notifiable, HasApiTokens;
 
-    /**
-     * The attributes that are mass assignable.
-     *
-     * @var list<string>
-     */
-   protected $fillable = [
-    'full_name', 'email', 'phone', 'password', 
-    'phone_otp', 'phone_otp_expires_at', 'role', 'fcm_token'
-];
+    protected $fillable = [
+        'full_name',
+        'email',
+        'phone',
+        'password',
+        'phone_otp',
+        'phone_otp_expires_at',
+        'role',
+        'fcm_token',
+    ];
 
-    /**
-     * The attributes that should be hidden for serialization.
-     *
-     * @var list<string>
-     */
     protected $hidden = [
         'password',
         'remember_token',
+        'phone_otp',          // لا نكشف الـ OTP المشفّر في الـ Response
+        'phone_otp_expires_at',
     ];
 
-    /**
-     * Get the attributes that should be cast.
-     *
-     * @return array<string, string>
-     */
     protected function casts(): array
     {
         return [
-            'email_verified_at' => 'datetime',
-            'password' => 'hashed',
+            'email_verified_at'     => 'datetime',
+            'phone_verified_at'     => 'datetime',
+            'phone_otp_expires_at'  => 'datetime',
         ];
     }
-    // علاقة المستخدم باشتراكه
-public function subscription()
-{
-    return $this->hasOne(Subscription::class);
-}
 
-// علاقة المدير بعمليات التحويل التي قام بها
-public function fundTransfers()
-{
-    return $this->hasMany(FundTransfer::class, 'created_by');
-}
+    // ── Relationships ──────────────────────────────────────
+
+    public function subscription()
+    {
+        return $this->hasOne(Subscription::class);
+    }
+
+    public function fundTransfers()
+    {
+        return $this->hasMany(FundTransfer::class, 'created_by');
+    }
 }
