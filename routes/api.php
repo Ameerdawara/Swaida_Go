@@ -11,6 +11,7 @@ use App\Http\Controllers\AppFundController;
 use App\Http\Controllers\CharityFundController;
 use App\Http\Controllers\FundTransferController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\AdminController;
 use App\Models\Payment;
 use App\Models\User;
 /*
@@ -167,13 +168,27 @@ Route::middleware('auth:sanctum')->group(function () {
     // نستخدم "can:admin-only" التي عرفناها في الـ Gate داخل AppServiceProvider
     Route::middleware('can:admin-only')->prefix('admin')->group(function () {
 
-        // عرض أرصدة الصناديق
-        Route::get('/app-fund', [AppFundController::class, 'index']);         // رصيد التطبيق الإلكتروني
-        Route::get('/charity-fund', [CharityFundController::class, 'index']); // رصيد الجمعية المحول
+        // ── Dashboard ─────────────────────────────────────────
+        Route::get('/dashboard-stats', [AdminController::class, 'dashboardStats']);
 
-        // إدارة تحويلات الأموال
-        Route::post('/transfer', [FundTransferController::class, 'store']);         // إجراء تحويل جديد للجمعية
-        Route::get('/transfers-history', [FundTransferController::class, 'index']); // سجل جميع التحويلات
+        // ── تقارير المشتركين ──────────────────────────────────
+        // GET /api/admin/subscribers-report?month=&year=
+        Route::get('/subscribers-report', [AdminController::class, 'subscribersReport']);
+
+        // ── تقارير الصناديق ───────────────────────────────────
+        // GET /api/admin/fund-summary?type=&month=&year=
+        Route::get('/fund-summary', [AdminController::class, 'fundSummary']);
+
+        // ── تحويلات الأموال ───────────────────────────────────
+        // GET  /api/admin/fund-transfers?type=&month=&year=
+        // POST /api/admin/fund-transfers
+        Route::get('/fund-transfers',  [AdminController::class, 'fundTransfers']);
+        Route::post('/fund-transfers', [FundTransferController::class, 'store']);
+
+        // ── الصناديق (القديمة — محتفظ بها للتوافقية) ──────────
+        Route::get('/app-fund',         [AppFundController::class, 'index']);
+        Route::get('/charity-fund',     [CharityFundController::class, 'index']);
+        Route::get('/transfers-history',[FundTransferController::class, 'index']);
 
     });
 
