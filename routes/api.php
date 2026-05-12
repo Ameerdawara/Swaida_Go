@@ -11,6 +11,7 @@ use App\Http\Controllers\AppFundController;
 use App\Http\Controllers\CharityFundController;
 use App\Http\Controllers\FundTransferController;
 use App\Http\Controllers\SettingController;
+use App\Models\Payment;
 use App\Models\User;
 /*
 |--------------------------------------------------------------------------
@@ -82,10 +83,59 @@ Route::post('/payment/webhook', [PaymentController::class, 'webhook']);
 Route::middleware('auth:sanctum')->group(function () {
 
     // إدارة الملف الشخصي
+    //////////////////////////////////
+    ///////////////////////////////////
+    //////////////////////////////////
     Route::get('/user', function (Request $request) {
-        return $request->user();
-    });
+    $user = $request->user()->load([
+        'subscription.payments',
+    ]);
 
+    $monthNames = [
+        1 => 'يناير', 2 => 'فبراير', 3 => 'مارس', 4 => 'أبريل',
+        5 => 'مايو', 6 => 'يونيو', 7 => 'يوليو', 8 => 'أغسطس',
+        9 => 'سبتمبر', 10 => 'أكتوبر', 11 => 'نوفمبر', 12 => 'ديسمبر',
+    ];
+
+    return response()->json([
+        'id'        => $user->id,
+        'full_name' => $user->full_name,
+        'email'     => $user->email,
+        'phone'     => $user->phone,
+        'joined_at' => $user->created_at->toDateString(),
+
+        'subscription' => $user->subscription ? [
+            'id'             => $user->subscription->id,
+            'annual_amount'  => (float) $user->subscription->annual_amount,
+            'monthly_amount' => (float) $user->subscription->monthly_amount,
+            'start_date'     => $user->subscription->start_date,
+
+            'months' => $user->subscription->payments->map(fn($p) => [
+                'month_number' => $p->month_number,
+                'month_name'   => ($monthNames[$p->month_number] ?? 'شهر') . ' ' . $p->year,
+                'status'       => Payment::getStatus($p->month_number, $p->year, $p->paid_at),
+                'amount' => (float) $p->amount,
+                'paid_at'      => $p->paid_at,
+            ])->values(),
+        ] : null,
+
+        'payment_history' => $user->subscription
+            ? $user->subscription->payments
+                ->filter(fn($p) => $p->paid_at !== null)
+                ->map(fn($p) => [
+                    'id'             => $p->id,
+                    'months'         => [$p->month_number],
+                    'amount' => (float) $p->amount,
+                    'paid_at'        => $p->paid_at,
+                    'receipt_number' => $p->payment_gateway_ref ?? 'REC-' . str_pad($p->id, 6, '0', STR_PAD_LEFT),
+                ])->values()
+            : [],
+    ]);
+});
+
+    ///////////////////////////////////////
+    //////////////////////////////////////
+    //////////////////////////////////////
     // تحديث رمز إشعارات Firebase
     Route::post('/update-fcm-token', [AuthController::class, 'updateFcmToken']);
 

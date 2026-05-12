@@ -245,47 +245,47 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
     //    يقبل: phone + password
     //    يشترط: توثيق البريد + توثيق الهاتف
     // ══════════════════════════════════════════════════════════
-    public function login(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'phone'    => 'required|string',
-            'password' => 'required|string',
-        ], [
-            'phone.required'    => 'رقم الهاتف مطلوب.',
-            'password.required' => 'كلمة المرور مطلوبة.',
-        ]);
+    // داخل ملف app/Http/Controllers/AuthController.php
+public function login(Request $request)
+{
+    // 1. التحقق من البريد الإلكتروني
+    $validator = Validator::make($request->all(), [
+        'email'    => 'required|string|email',
+        'password' => 'required|string',
+    ], [
+        'email.required'    => 'البريد الإلكتروني مطلوب.',
+        'email.email'       => 'صيغة البريد الإلكتروني غير صحيحة.',
+        'password.required' => 'كلمة المرور مطلوبة.',
+    ], []); // المصفوفة الرابعة الفارغة لحل خطأ P1005
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        $user = User::where('phone', $request->phone)->first();
-
-        if (!$user || !Hash::check($request->password, $user->password)) {
-            return response()->json(['message' => 'بيانات الدخول غير صحيحة.'], 401);
-        }
-
-        if (!$user->hasVerifiedEmail()) {
-            return response()->json([
-                'message' => 'يرجى توثيق بريدك الإلكتروني أولاً.',
-            ], 403);
-        }
-
-        if (!$user->phone_verified_at) {
-            return response()->json([
-                'message' => 'يرجى توثيق رقم الهاتف أولاً.',
-            ], 403);
-        }
-
-        $token = $user->createToken('auth_token')->plainTextToken;
-
-        return response()->json([
-            'message'      => 'تم تسجيل الدخول بنجاح.',
-            'access_token' => $token,
-            'token_type'   => 'Bearer',
-            'user'         => $user,
-        ], 200);
+    if ($validator->fails()) {
+        return response()->json(['errors' => $validator->errors()], 422);
     }
+
+    // 2. البحث عن المستخدم بواسطة البريد
+    $user = User::where('email', $request->email)->first();
+
+    if (!$user || !Hash::check($request->password, $user->password)) {
+        return response()->json(['message' => 'بيانات الدخول غير صحيحة.'], 401);
+    }
+
+    // 3. التحقق من التوثيق
+    if (!$user->hasVerifiedEmail()) {
+        return response()->json(['message' => 'يرجى توثيق بريدك الإلكتروني أولاً.'], 403);
+    }
+
+    if (!$user->phone_verified_at) {
+        return response()->json(['message' => 'يرجى توثيق رقم الهاتف أولاً.'], 403);
+    }
+
+    $token = $user->createToken('auth_token')->plainTextToken;
+
+    return response()->json([
+        'message'      => 'تم تسجيل الدخول بنجاح.',
+        'access_token' => $token,
+        'user'         => $user,
+    ], 200);
+}
 
     // ══════════════════════════════════════════════════════════
     // 7. تحديث رمز إشعارات FCM
