@@ -111,7 +111,7 @@ public function initiate(Request $request)
                 'total_to_pay' => round($totalToPay, 2),
             ],
             'payment_ids'  => $payments->pluck('id'),
-            'checkout_url' => url('/payment/mock-success?payment_ids=' . implode(',', $payments->pluck('id')->toArray())),
+            'checkout_url' => url('/api/payment/mock-success?payment_ids=' . implode(',', $payments->pluck('id')->toArray())),
             'total_amount' => round($totalToPay, 2),
             'months'       => $request->months,
         ], 200);
