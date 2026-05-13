@@ -248,5 +248,6 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::middleware('IsAdmin')->prefix('admin')->group(function () {
         Route::post('/settings/commission', [SettingController::class, 'updateCommission']);
+        Route::post('/payments/mark-manual-paid', [PaymentController::class, 'markPreviousMonthsAsPaid']);
     });
 });

@@ -208,4 +208,40 @@ if (!hash_equals($expected, $h1)) {
             return response()->json(['message' => 'فشل معالجة الدفع', 'error' => $e->getMessage()], 500);
         }
     }
+    
+    // app/Http/Controllers/PaymentController.php
+
+public function markPreviousMonthsAsPaid(Request $request)
+{
+    // 1. التحقق من المدخلات
+    $request->validate([
+        'subscription_id' => 'required|exists:subscriptions,id',
+        'up_to_month' => 'required|integer|min:1|max:12',
+        'up_to_year' => 'required|integer|min:2024',
+    ], [
+        'subscription_id.required' => 'رقم الاشتراك مطلوب.',
+        'subscription_id.exists' => 'الاشتراك المحدد غير موجود.',
+        'up_to_month.required' => 'يرجى تحديد الشهر.',
+        'up_to_year.required' => 'يرجى تحديد السنة.',
+    ]);
+
+    // 2. تحديث الدفعات لتصبح "مدفوعة" (Paid)
+    $updatedCount = \App\Models\Payment::where('subscription_id', $request->subscription_id)
+        ->where('status', '!=', 'paid') // فقط الأشهر غير المدفوعة أصلاً
+        ->where(function ($query) use ($request) {
+            $query->where('year', '<', $request->up_to_year)
+                ->orWhere(function ($q) use ($request) {
+                    $q->where('year', $request->up_to_year)
+                      ->where('month_number', '<=', $request->up_to_month);
+                });
+        })
+        ->update([
+            'status' => 'paid',
+            'paid_at' => now(), // توثيق وقت السداد الحالي
+        ]);
+
+    return response()->json([
+        'message' => "تم بنجاح تحديث $updatedCount شهر كمدفوعة لهذا المشترك.",
+    ], 200);
+}
 }
