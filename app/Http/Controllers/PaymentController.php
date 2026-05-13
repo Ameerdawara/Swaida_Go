@@ -70,73 +70,81 @@ class PaymentController extends Controller
         return $checkoutUrl;
     }
     // تهيئة جلسة الدفع (تُستدعى من تطبيق الـ Flutter)
-    public function initiate(Request $request)
-    {
-        $request->validate([
-            'months' => 'required|array',
-            'months.*' => 'integer|min:1|max:12'
-        ]);
+public function initiate(Request $request)
+{
+    $request->validate([
+        'months' => 'required|array',
+        'months.*' => 'integer|min:1|max:12'
+    ]);
 
-        $user = $request->user();
-        $subscription = $user->subscription;
+    $user = $request->user();
+    $subscription = $user->subscription;
 
-        if (!$subscription) {
-            return response()->json(['message' => 'لا يوجد اشتراك نشط'], 404);
-        }
+    if (!$subscription) {
+        return response()->json(['message' => 'لا يوجد اشتراك نشط'], 404);
+    }
 
-        // 1. جلب الدفعات المستحقة
-        $payments = Payment::where('subscription_id', $subscription->id)
-            ->whereIn('month_number', $request->months)
-            ->whereNull('paid_at')
-            ->get();
+    $payments = Payment::where('subscription_id', $subscription->id)
+        ->whereIn('month_number', $request->months)
+        ->whereNull('paid_at')
+        ->get();
 
-        if ($payments->isEmpty()) {
-            return response()->json(['message' => 'لم يتم العثور على دفعات مستحقة'], 400);
-        }
+    if ($payments->isEmpty()) {
+        return response()->json(['message' => 'لم يتم العثور على دفعات مستحقة'], 400);
+    }
 
-        // 2. حساب المبلغ الأساسي (مثلاً 50 دولار)
-        $baseAmount = $payments->sum('amount');
+    $baseAmount = $payments->sum('amount');
+    $setting = Setting::first();
+    $commissionPercentage = $setting ? $setting->commission_percentage : 0;
+    $commissionAmount = $baseAmount * ($commissionPercentage / 100);
+    $fixedFee = 0.5;
+    $totalToPay = $baseAmount + $commissionAmount + $fixedFee;
 
-        // 3. جلب نسبة العمولة من الإعدادات (مثلاً 5%)
-        $setting = Setting::first();
-        $commissionPercentage = $setting ? $setting->commission_percentage : 0;
-
-        // 4. تطبيق المعادلة: (المبلغ + النسبة المئوية + 0.5 ثابتة)
-        $commissionAmount = $baseAmount * ($commissionPercentage / 100);
-        $fixedFee = 0.5;
-
-        $totalToPay = $baseAmount + $commissionAmount + $fixedFee;
-\Illuminate\Support\Facades\Log::info('Paddle Key', ['key' => config('services.paddle.secret_key')]);
-        try {
-            $checkoutUrl = $this->createPaddleCheckout(
-                amount: $totalToPay,
-                paymentIds: $payments->pluck('id')->toArray(),
-                userId: $user->id
-            );
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::error('Paddle Checkout Error', ['error' => $e->getMessage()]);
-            return response()->json([
-                'message' => 'فشل إنشاء جلسة الدفع: ' . $e->getMessage(),
-            ], 500);
-        }
-
-        // 5. تجهيز بيانات الدفع للإرسال
+    // ── Mock Mode للتطوير المحلي ──────────────────────────
+    if (app()->environment('local')) {
         return response()->json([
-            'message' => 'تم حساب إجمالي الرسوم',
-            'details' => [
-                'base_amount' => round($baseAmount, 2),        // المبلغ الأصلي
-                'commission' => round($commissionAmount, 2),  // قيمة النسبة المئوية
-                'fixed_fee' => $fixedFee,                     // 0.5
-                'total_to_pay' => round($totalToPay, 2)       // المبلغ النهائي المطلوب دفعه
+            'message'      => '[MOCK] تم حساب إجمالي الرسوم',
+            'details'      => [
+                'base_amount'  => round($baseAmount, 2),
+                'commission'   => round($commissionAmount, 2),
+                'fixed_fee'    => $fixedFee,
+                'total_to_pay' => round($totalToPay, 2),
             ],
-            'payment_ids' => $payments->pluck('id'),
-            // هنا يوضع رابط بوابة الدفع بعد تمرير $totalToPay لها
-            'checkout_url' => $checkoutUrl,
+            'payment_ids'  => $payments->pluck('id'),
+            'checkout_url' => url('/payment/mock-success?payment_ids=' . implode(',', $payments->pluck('id')->toArray())),
             'total_amount' => round($totalToPay, 2),
             'months'       => $request->months,
         ], 200);
     }
+    // ─────────────────────────────────────────────────────
 
+    try {
+        $checkoutUrl = $this->createPaddleCheckout(
+            amount: $totalToPay,
+            paymentIds: $payments->pluck('id')->toArray(),
+            userId: $user->id
+        );
+    } catch (\Exception $e) {
+        \Illuminate\Support\Facades\Log::error('Paddle Checkout Error', ['error' => $e->getMessage()]);
+        return response()->json([
+            'message' => 'فشل إنشاء جلسة الدفع: ' . $e->getMessage(),
+        ], 500);
+    }
+
+    return response()->json([
+        'message'      => 'تم حساب إجمالي الرسوم',
+        'details'      => [
+            'base_amount'  => round($baseAmount, 2),
+            'commission'   => round($commissionAmount, 2),
+            'fixed_fee'    => $fixedFee,
+            'total_to_pay' => round($totalToPay, 2),
+        ],
+        'payment_ids'  => $payments->pluck('id'),
+        'checkout_url' => $checkoutUrl,
+        'total_amount' => round($totalToPay, 2),
+        'months'       => $request->months,
+    ], 200);
+}
     // استقبال تأكيد الدفع من البوابة (Webhook)
     public function webhook(Request $request)
     {

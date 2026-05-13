@@ -133,7 +133,42 @@ Route::middleware('auth:sanctum')->group(function () {
             : [],
     ]);
 });
+// Mock payment success — للتطوير المحلي فقط
+if (app()->environment('local')) {
+    Route::get('/payment/mock-success', function (Request $request) {
+        $paymentIds = explode(',', $request->query('payment_ids', ''));
+        if (empty(array_filter($paymentIds))) {
+            return response()->json(['message' => 'لا توجد معرّفات دفعات'], 400);
+        }
 
+        \Illuminate\Support\Facades\DB::beginTransaction();
+        try {
+            $payments = \App\Models\Payment::whereIn('id', $paymentIds)
+                ->whereNull('paid_at')
+                ->get();
+
+            foreach ($payments as $payment) {
+                $payment->status     = 'paid';
+                $payment->paid_at    = \Carbon\Carbon::now();
+                $payment->payment_gateway_ref = 'MOCK-' . strtoupper(\Illuminate\Support\Str::random(8));
+                $payment->save();
+            }
+
+            $appFund = \App\Models\AppFund::firstOrCreate(['id' => 1]);
+            $appFund->balance    += $payments->sum('amount');
+            $appFund->last_updated = \Carbon\Carbon::now();
+            $appFund->save();
+
+            \Illuminate\Support\Facades\DB::commit();
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\DB::rollBack();
+            return response()->json(['message' => 'فشل: ' . $e->getMessage()], 500);
+        }
+
+        // redirect للـ Flutter عبر نفس الـ pattern الذي يستمع له PaymentWebViewScreen
+        return redirect(url('/payment/success?session_id=mock_' . time()));
+    });
+}
     ///////////////////////////////////////
     //////////////////////////////////////
     //////////////////////////////////////
