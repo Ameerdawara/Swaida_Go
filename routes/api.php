@@ -3,7 +3,6 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-// استيراد جميع المتحكمات (Controllers)
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PaymentController;
@@ -14,6 +13,7 @@ use App\Http\Controllers\SettingController;
 use App\Http\Controllers\AdminController;
 use App\Models\Payment;
 use App\Models\User;
+
 /*
 |--------------------------------------------------------------------------
 | API Routes - Swaida Go
@@ -24,63 +24,98 @@ use App\Models\User;
 // 1. المسارات العامة (Public Routes)
 // -----------------------------------------------------------
 
-// مسارات المصادقة والتوثيق
-Route::post('/register', [AuthController::class, 'register']);     // تسجيل حساب جديد → يُرسل رابط البريد + OTP الهاتف
-Route::post('/login', [AuthController::class, 'login']);           // تسجيل الدخول (phone + password)
+Route::post('/register', [AuthController::class, 'register']);
+Route::post('/login',    [AuthController::class, 'login']);
 
-// ── توثيق البريد الإلكتروني ────────────────────────────────
-
-// رابط التوثيق الذي يصل للمستخدم عبر البريد (signed URL يُولّده Laravel)
-// المستخدم يضغطه من بريده → Laravel يضع email_verified_at تلقائياً
 Route::get('/email/verify/{id}/{hash}', function (Request $request, $id, $hash) {
-
-    // 1. البحث عن المستخدم عبر معرفه
     $user = User::findOrFail($id);
-
-    // 2. التحقق من أن الـ Hash المرسل يطابق بريد المستخدم
     if (! hash_equals((string) $hash, sha1($user->getEmailForVerification()))) {
         return response()->json(['message' => 'رابط التوثيق غير صالح أو منتهي الصلاحية.'], 403);
     }
-
-    // 3. التحقق إذا كان البريد موثقاً بالفعل
     if ($user->hasVerifiedEmail()) {
         return response()->json(['message' => 'البريد الإلكتروني موثق مسبقاً.'], 200);
     }
-
-    // 4. تنفيذ التوثيق
     if ($user->markEmailAsVerified()) {
         event(new \Illuminate\Auth\Events\Verified($user));
     }
-
-    return response()->json([
-        'message' => 'تم توثيق البريد الإلكتروني بنجاح.'
-    ], 200);
-
+    return response()->json(['message' => 'تم توثيق البريد الإلكتروني بنجاح.'], 200);
 })->middleware(['signed'])->name('verification.verify');
 
-// Flutter يستدعيه كل 5 ثوانٍ (Polling) لمعرفة هل وثّق المستخدم بريده
-// مثال: GET /api/auth/email-verification-status?email=user@example.com
 Route::get('/auth/email-verification-status', [AuthController::class, 'checkEmailVerificationStatus']);
-
-// إعادة إرسال رابط التوثيق (زر "إعادة الإرسال" في شاشة EmailVerificationScreen)
 Route::post('/auth/resend-email-verification', [AuthController::class, 'resendEmailVerification']);
-
-// ── توثيق رقم الهاتف ───────────────────────────────────────
-
-// يشترط توثيق البريد مسبقاً (Backend يرفض بـ 403 إن لم يكن كذلك)
-Route::post('/verify-otp', [AuthController::class, 'verifyOtp']);
-
-// إعادة إرسال OTP الهاتف
+Route::post('/verify-otp',      [AuthController::class, 'verifyOtp']);
 Route::post('/auth/resend-otp', [AuthController::class, 'resendOtp']);
-
-// مسار استقبال تأكيدات الدفع من البوابات الخارجية (Webhooks)
-// ملاحظة: هذا المسار يجب أن يكون مستثنى من حماية CSRF
 Route::post('/payment/webhook', [PaymentController::class, 'webhook']);
 
-// ── Mock payment success — للتطوير المحلي فقط ──────────────
-// هذا المسار عام (بدون auth) لأن الـ WebView يفتحه كمتصفح بدون token
+// ── Mock payment — للتطوير المحلي فقط ──────────────────────
+// هذه المسارات عامة (بدون auth) لأن الـ WebView يفتحها كمتصفح
 if (app()->environment('local')) {
+
+    // STEP 1: يعرض صفحة تأكيد HTML — المستخدم يختار تأكيد أو إلغاء
     Route::get('/payment/mock-success', function (Request $request) {
+        $paymentIds = $request->query('payment_ids', '');
+        $ids        = array_filter(explode(',', $paymentIds));
+
+        if (empty($ids)) {
+            return response()->json(['message' => 'لا توجد معرّفات دفعات'], 400);
+        }
+
+        return response('
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تأكيد الدفع</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family: Arial, sans-serif; background: #f4f7f5;
+      display:flex; align-items:center; justify-content:center;
+      min-height:100vh; padding:24px;
+    }
+    .card {
+      background:white; border-radius:20px; padding:36px 28px;
+      max-width:380px; width:100%;
+      box-shadow:0 4px 24px rgba(0,0,0,0.08); text-align:center;
+    }
+    .icon { font-size:56px; margin-bottom:16px; }
+    h2   { color:#1a3a2a; font-size:20px; margin-bottom:8px; }
+    p    { color:#6b7280; font-size:14px; margin-bottom:28px; line-height:1.6; }
+    .btn {
+      display:block; width:100%; padding:14px;
+      background:linear-gradient(135deg,#2d6a4f,#40916c);
+      color:white; border:none; border-radius:12px;
+      font-size:16px; font-weight:bold; cursor:pointer;
+      text-decoration:none; margin-bottom:12px;
+    }
+    .btn-cancel { background:none; color:#ef4444; border:1.5px solid #ef4444; }
+    .badge {
+      margin-top:20px; font-size:11px; color:#9ca3af;
+      display:flex; align-items:center; justify-content:center; gap:4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">💳</div>
+    <h2>تأكيد الدفع التجريبي</h2>
+    <p>هذه بيئة اختبار محلية.<br>اضغط "تأكيد الدفع" لمحاكاة إتمام العملية.</p>
+    <a href="/api/payment/mock-confirm?payment_ids=' . htmlspecialchars($paymentIds) . '" class="btn">
+      ✅ تأكيد الدفع
+    </a>
+    <a href="/api/payment/cancel" class="btn btn-cancel">
+      ❌ إلغاء
+    </a>
+    <div class="badge">🔒 بيئة تطوير محلية فقط</div>
+  </div>
+</body>
+</html>
+        ', 200, ['Content-Type' => 'text/html; charset=UTF-8']);
+    });
+
+    // STEP 2: ينفّذ الدفع فعلاً بعد تأكيد المستخدم
+    Route::get('/payment/mock-confirm', function (Request $request) {
         $paymentIds = array_filter(explode(',', $request->query('payment_ids', '')));
 
         if (empty($paymentIds)) {
@@ -111,8 +146,17 @@ if (app()->environment('local')) {
             return response()->json(['message' => 'فشل: ' . $e->getMessage()], 500);
         }
 
-        // redirect لنفس الـ pattern الذي يستمع له PaymentWebViewScreen
+        // Flutter يكتشف /payment/success ويعمل go('/confirmation')
         return redirect(url('/api/payment/success?session_id=mock_' . time()));
+    });
+
+    // مسار الإلغاء — Flutter يكتشف /payment/cancel ويعود لـ /home
+    Route::get('/payment/cancel', function () {
+        return response(
+            '<h3 style="text-align:center;margin-top:40px;font-family:Arial;color:#ef4444">تم إلغاء الدفع</h3>',
+            200,
+            ['Content-Type' => 'text/html; charset=UTF-8']
+        );
     });
 }
 // ───────────────────────────────────────────────────────────
@@ -124,11 +168,8 @@ if (app()->environment('local')) {
 
 Route::middleware('auth:sanctum')->group(function () {
 
-    // إدارة الملف الشخصي
     Route::get('/user', function (Request $request) {
-        $user = $request->user()->load([
-            'subscription.payments',
-        ]);
+        $user = $request->user()->load(['subscription.payments']);
 
         $monthNames = [
             1 => 'يناير', 2 => 'فبراير', 3 => 'مارس', 4 => 'أبريل',
@@ -172,66 +213,40 @@ Route::middleware('auth:sanctum')->group(function () {
         ]);
     });
 
-    // تحديث رمز إشعارات Firebase
     Route::post('/update-fcm-token', [AuthController::class, 'updateFcmToken']);
 
-    // تسجيل الخروج
     Route::post('/logout', function (Request $request) {
         $request->user()->currentAccessToken()->delete();
         return response()->json(['message' => 'تم تسجيل الخروج بنجاح.'], 200);
     });
 
-    // إدارة الاشتراكات
     Route::prefix('subscription')->group(function () {
-        Route::post('/', [SubscriptionController::class, 'store']); // إنشاء اشتراك (سنوي)
-        Route::get('/', [SubscriptionController::class, 'show']);   // عرض حالة الـ 12 شهراً
+        Route::post('/', [SubscriptionController::class, 'store']);
+        Route::get('/',  [SubscriptionController::class, 'show']);
     });
 
-    // عمليات الدفع
     Route::prefix('payment')->group(function () {
-        Route::post('/initiate', [PaymentController::class, 'initiate']); // بدء عملية دفع لأشهر محددة
+        Route::post('/initiate', [PaymentController::class, 'initiate']);
     });
 
-    // مسار جلب العمولة (متاح للمستخدمين والمدير لكي يعرضها التطبيق أثناء الدفع)
     Route::get('/settings/commission', [SettingController::class, 'getCommission']);
 
-
     // -----------------------------------------------------------
-    // 3. مسارات الإدارة - للمدير فقط (Admin Only)
+    // 3. مسارات الإدارة - للمدير فقط
     // -----------------------------------------------------------
 
-    // نستخدم "can:admin-only" التي عرفناها في الـ Gate داخل AppServiceProvider
     Route::middleware('can:admin-only')->prefix('admin')->group(function () {
-
-        // ── Dashboard ─────────────────────────────────────────
-        Route::get('/dashboard-stats', [AdminController::class, 'dashboardStats']);
-
-        // ── تقارير المشتركين ──────────────────────────────────
-        // GET /api/admin/subscribers-report?month=&year=
+        Route::get('/dashboard-stats',    [AdminController::class, 'dashboardStats']);
         Route::get('/subscribers-report', [AdminController::class, 'subscribersReport']);
-
-        // ── تقارير الصناديق ───────────────────────────────────
-        // GET /api/admin/fund-summary?type=&month=&year=
-        Route::get('/fund-summary', [AdminController::class, 'fundSummary']);
-
-        // ── تحويلات الأموال ───────────────────────────────────
-        // GET  /api/admin/fund-transfers?type=&month=&year=
-        // POST /api/admin/fund-transfers
-        Route::get('/fund-transfers',  [AdminController::class, 'fundTransfers']);
-        Route::post('/fund-transfers', [FundTransferController::class, 'store']);
-
-        // ── الصناديق (القديمة — محتفظ بها للتوافقية) ──────────
-        Route::get('/app-fund',          [AppFundController::class, 'index']);
-        Route::get('/charity-fund',      [CharityFundController::class, 'index']);
-        Route::get('/transfers-history', [FundTransferController::class, 'index']);
-
+        Route::get('/fund-summary',       [AdminController::class, 'fundSummary']);
+        Route::get('/fund-transfers',     [AdminController::class, 'fundTransfers']);
+        Route::post('/fund-transfers',    [FundTransferController::class, 'store']);
+        Route::get('/app-fund',           [AppFundController::class, 'index']);
+        Route::get('/charity-fund',       [CharityFundController::class, 'index']);
+        Route::get('/transfers-history',  [FundTransferController::class, 'index']);
     });
 
-    // مسارات المدير (Admin Only) — IsAdmin middleware
     Route::middleware('IsAdmin')->prefix('admin')->group(function () {
-
-        // مسار تعديل العمولة (خاص بالمدير فقط)
         Route::post('/settings/commission', [SettingController::class, 'updateCommission']);
-
     });
 });
