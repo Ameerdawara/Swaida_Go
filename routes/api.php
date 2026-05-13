@@ -57,6 +57,7 @@ Route::get('/email/verify/{id}/{hash}', function (Request $request, $id, $hash) 
     ], 200);
 
 })->middleware(['signed'])->name('verification.verify');
+
 // Flutter يستدعيه كل 5 ثوانٍ (Polling) لمعرفة هل وثّق المستخدم بريده
 // مثال: GET /api/auth/email-verification-status?email=user@example.com
 Route::get('/auth/email-verification-status', [AuthController::class, 'checkEmailVerificationStatus']);
@@ -76,68 +77,13 @@ Route::post('/auth/resend-otp', [AuthController::class, 'resendOtp']);
 // ملاحظة: هذا المسار يجب أن يكون مستثنى من حماية CSRF
 Route::post('/payment/webhook', [PaymentController::class, 'webhook']);
 
-
-// -----------------------------------------------------------
-// 2. المسارات المحمية - للمشتركين (Authenticated Users)
-// -----------------------------------------------------------
-
-Route::middleware('auth:sanctum')->group(function () {
-
-    // إدارة الملف الشخصي
-    //////////////////////////////////
-    ///////////////////////////////////
-    //////////////////////////////////
-    Route::get('/user', function (Request $request) {
-    $user = $request->user()->load([
-        'subscription.payments',
-    ]);
-
-    $monthNames = [
-        1 => 'يناير', 2 => 'فبراير', 3 => 'مارس', 4 => 'أبريل',
-        5 => 'مايو', 6 => 'يونيو', 7 => 'يوليو', 8 => 'أغسطس',
-        9 => 'سبتمبر', 10 => 'أكتوبر', 11 => 'نوفمبر', 12 => 'ديسمبر',
-    ];
-
-    return response()->json([
-        'id'        => $user->id,
-        'full_name' => $user->full_name,
-        'email'     => $user->email,
-        'phone'     => $user->phone,
-        'joined_at' => $user->created_at->toDateString(),
-
-        'subscription' => $user->subscription ? [
-            'id'             => $user->subscription->id,
-            'annual_amount'  => (float) $user->subscription->annual_amount,
-            'monthly_amount' => (float) $user->subscription->monthly_amount,
-            'start_date'     => $user->subscription->start_date,
-
-            'months' => $user->subscription->payments->map(fn($p) => [
-                'month_number' => $p->month_number,
-                'month_name'   => ($monthNames[$p->month_number] ?? 'شهر') . ' ' . $p->year,
-                'status'       => Payment::getStatus($p->month_number, $p->year, $p->paid_at),
-                'amount' => (float) $p->amount,
-                'paid_at'      => $p->paid_at,
-            ])->values(),
-        ] : null,
-
-        'payment_history' => $user->subscription
-            ? $user->subscription->payments
-                ->filter(fn($p) => $p->paid_at !== null)
-                ->map(fn($p) => [
-                    'id'             => $p->id,
-                    'months'         => [$p->month_number],
-                    'amount' => (float) $p->amount,
-                    'paid_at'        => $p->paid_at,
-                    'receipt_number' => $p->payment_gateway_ref ?? 'REC-' . str_pad($p->id, 6, '0', STR_PAD_LEFT),
-                ])->values()
-            : [],
-    ]);
-});
-// Mock payment success — للتطوير المحلي فقط
+// ── Mock payment success — للتطوير المحلي فقط ──────────────
+// هذا المسار عام (بدون auth) لأن الـ WebView يفتحه كمتصفح بدون token
 if (app()->environment('local')) {
     Route::get('/payment/mock-success', function (Request $request) {
-        $paymentIds = explode(',', $request->query('payment_ids', ''));
-        if (empty(array_filter($paymentIds))) {
+        $paymentIds = array_filter(explode(',', $request->query('payment_ids', '')));
+
+        if (empty($paymentIds)) {
             return response()->json(['message' => 'لا توجد معرّفات دفعات'], 400);
         }
 
@@ -148,14 +94,14 @@ if (app()->environment('local')) {
                 ->get();
 
             foreach ($payments as $payment) {
-                $payment->status     = 'paid';
-                $payment->paid_at    = \Carbon\Carbon::now();
+                $payment->status              = 'paid';
+                $payment->paid_at             = \Carbon\Carbon::now();
                 $payment->payment_gateway_ref = 'MOCK-' . strtoupper(\Illuminate\Support\Str::random(8));
                 $payment->save();
             }
 
             $appFund = \App\Models\AppFund::firstOrCreate(['id' => 1]);
-            $appFund->balance    += $payments->sum('amount');
+            $appFund->balance     += $payments->sum('amount');
             $appFund->last_updated = \Carbon\Carbon::now();
             $appFund->save();
 
@@ -165,13 +111,67 @@ if (app()->environment('local')) {
             return response()->json(['message' => 'فشل: ' . $e->getMessage()], 500);
         }
 
-        // redirect للـ Flutter عبر نفس الـ pattern الذي يستمع له PaymentWebViewScreen
-        return redirect(url('/payment/success?session_id=mock_' . time()));
+        // redirect لنفس الـ pattern الذي يستمع له PaymentWebViewScreen
+        return redirect(url('/api/payment/success?session_id=mock_' . time()));
     });
 }
-    ///////////////////////////////////////
-    //////////////////////////////////////
-    //////////////////////////////////////
+// ───────────────────────────────────────────────────────────
+
+
+// -----------------------------------------------------------
+// 2. المسارات المحمية - للمشتركين (Authenticated Users)
+// -----------------------------------------------------------
+
+Route::middleware('auth:sanctum')->group(function () {
+
+    // إدارة الملف الشخصي
+    Route::get('/user', function (Request $request) {
+        $user = $request->user()->load([
+            'subscription.payments',
+        ]);
+
+        $monthNames = [
+            1 => 'يناير', 2 => 'فبراير', 3 => 'مارس', 4 => 'أبريل',
+            5 => 'مايو', 6 => 'يونيو', 7 => 'يوليو', 8 => 'أغسطس',
+            9 => 'سبتمبر', 10 => 'أكتوبر', 11 => 'نوفمبر', 12 => 'ديسمبر',
+        ];
+
+        return response()->json([
+            'id'        => $user->id,
+            'full_name' => $user->full_name,
+            'email'     => $user->email,
+            'phone'     => $user->phone,
+            'joined_at' => $user->created_at->toDateString(),
+
+            'subscription' => $user->subscription ? [
+                'id'             => $user->subscription->id,
+                'annual_amount'  => (float) $user->subscription->annual_amount,
+                'monthly_amount' => (float) $user->subscription->monthly_amount,
+                'start_date'     => $user->subscription->start_date,
+
+                'months' => $user->subscription->payments->map(fn($p) => [
+                    'month_number' => $p->month_number,
+                    'month_name'   => ($monthNames[$p->month_number] ?? 'شهر') . ' ' . $p->year,
+                    'status'       => Payment::getStatus($p->month_number, $p->year, $p->paid_at),
+                    'amount'       => (float) $p->amount,
+                    'paid_at'      => $p->paid_at,
+                ])->values(),
+            ] : null,
+
+            'payment_history' => $user->subscription
+                ? $user->subscription->payments
+                    ->filter(fn($p) => $p->paid_at !== null)
+                    ->map(fn($p) => [
+                        'id'             => $p->id,
+                        'months'         => [$p->month_number],
+                        'amount'         => (float) $p->amount,
+                        'paid_at'        => $p->paid_at,
+                        'receipt_number' => $p->payment_gateway_ref ?? 'REC-' . str_pad($p->id, 6, '0', STR_PAD_LEFT),
+                    ])->values()
+                : [],
+        ]);
+    });
+
     // تحديث رمز إشعارات Firebase
     Route::post('/update-fcm-token', [AuthController::class, 'updateFcmToken']);
 
@@ -221,9 +221,9 @@ if (app()->environment('local')) {
         Route::post('/fund-transfers', [FundTransferController::class, 'store']);
 
         // ── الصناديق (القديمة — محتفظ بها للتوافقية) ──────────
-        Route::get('/app-fund',         [AppFundController::class, 'index']);
-        Route::get('/charity-fund',     [CharityFundController::class, 'index']);
-        Route::get('/transfers-history',[FundTransferController::class, 'index']);
+        Route::get('/app-fund',          [AppFundController::class, 'index']);
+        Route::get('/charity-fund',      [CharityFundController::class, 'index']);
+        Route::get('/transfers-history', [FundTransferController::class, 'index']);
 
     });
 
