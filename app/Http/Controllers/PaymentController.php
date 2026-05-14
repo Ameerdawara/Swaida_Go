@@ -21,7 +21,7 @@ class PaymentController extends Controller
             : 'https://api.paddle.com';
 
         $response = Http::withHeaders([
-                'Authorization' => config('services.paddle.secret_key'),
+                'Authorization' => 'Bearer ' .config('services.paddle.secret_key'),
                 'Content-Type'  => 'application/json',
             ])
             ->post("{$baseUrl}/transactions", [
