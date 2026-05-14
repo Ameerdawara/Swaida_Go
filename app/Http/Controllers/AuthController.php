@@ -4,27 +4,43 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Auth\Events\Registered;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
+
 class AuthController extends Controller
 {
     // ══════════════════════════════════════════════════════════
+    // الثوابت
+    // ══════════════════════════════════════════════════════════
+    private const OTP_EXPIRY_MINUTES  = 10;
+    private const OTP_RESEND_LIMIT    = 5;       // محاولات قبل الحظر
+    private const OTP_RESEND_DECAY    = 60;      // ثانية
+    private const LOGIN_LIMIT         = 10;
+    private const LOGIN_DECAY         = 60;      // ثانية
+
+    // ══════════════════════════════════════════════════════════
     // 1. تسجيل مستخدم جديد
+    //    POST /register
     //    - ينشئ المستخدم
     //    - يرسل رابط توثيق البريد (signed URL عبر Laravel المدمج)
     //    - يولّد OTP للهاتف ويخزّنه مشفراً
+    //    - يحفظ FCM token إن أُرسل
     //    لا يُعاد token هنا — يُعاد فقط بعد verifyOtp()
     // ══════════════════════════════════════════════════════════
-    public function register(Request $request)
+    public function register(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'full_name' => 'required|string|max:255',
             'email'     => 'required|string|email|max:255|unique:users',
             'phone'     => 'required|string|unique:users',
             'password'  => 'required|string|min:8',
+            'fcm_token' => 'nullable|string',
         ], [
             'full_name.required' => 'الاسم الكامل مطلوب.',
             'full_name.max'      => 'الاسم طويل جداً.',
@@ -41,37 +57,40 @@ class AuthController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        // توليد رمز OTP من 6 أرقام للهاتف
-        $otp = rand(100000, 999999);
+        $otp = $this->generateOtp();
 
         $user = User::create([
-            'full_name'             => $request->full_name,
-            'email'                 => $request->email,
-            'phone'                 => $request->phone,
-            'password'              => Hash::make($request->password),
-            'phone_otp'             => Hash::make($otp),
-            'phone_otp_expires_at'  => Carbon::now()->addMinutes(10),
-            'role'                  => 'subscriber',
+            'full_name'            => $request->full_name,
+            'email'                => $request->email,
+            'phone'                => $request->phone,
+            'password'             => Hash::make($request->password),
+            'phone_otp'            => Hash::make($otp),
+            'phone_otp_expires_at' => Carbon::now()->addMinutes(self::OTP_EXPIRY_MINUTES),
+            'role'                 => 'subscriber',
+            'fcm_token'            => $request->fcm_token,
         ]);
-Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
+
+        Log::info("OTP للمستخدم الجديد [{$user->email}]: {$otp}");
+
         // إطلاق حدث Registered → يُرسل Laravel رابط توثيق البريد تلقائياً
-        // (يشترط أن يكون User يُطبّق MustVerifyEmail)
         event(new Registered($user));
 
-        // في مرحلة الإنتاج: أرسل $otp عبر Twilio أو خدمة SMS
-        // حالياً نُعيده في الـ Response لغايات الاختبار فقط
-        return response()->json([
-            'message'  => 'تم التسجيل بنجاح. يرجى توثيق بريدك الإلكتروني أولاً ثم رقم هاتفك.',
-            'test_otp' => $otp, // ← احذف هذا السطر في الإنتاج
-        ], 201);
+        // في الإنتاج: أرسل $otp عبر Twilio أو خدمة SMS
+        $response = ['message' => 'تم التسجيل بنجاح. يرجى توثيق بريدك الإلكتروني أولاً ثم رقم هاتفك.'];
+
+        if (app()->environment('local')) {
+            $response['test_otp'] = $otp;
+        }
+
+        return response()->json($response, 201);
     }
 
     // ══════════════════════════════════════════════════════════
     // 2. إعادة إرسال رابط توثيق البريد الإلكتروني
-    //    Route: POST /auth/resend-email-verification
+    //    POST /auth/resend-email-verification
     //    يقبل: email
     // ══════════════════════════════════════════════════════════
-    public function resendEmailVerification(Request $request)
+    public function resendEmailVerification(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'email' => 'required|email',
@@ -87,7 +106,8 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
         $user = User::where('email', $request->email)->first();
 
         if (!$user) {
-            return response()->json(['message' => 'المستخدم غير موجود.'], 404);
+            // نُعيد 200 عمداً لمنع كشف وجود البريد (Security: User Enumeration)
+            return response()->json(['message' => 'إذا كان البريد مسجلاً، سيصلك رابط التوثيق.'], 200);
         }
 
         if ($user->hasVerifiedEmail()) {
@@ -96,18 +116,15 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
 
         $user->sendEmailVerificationNotification();
 
-        return response()->json([
-            'message' => 'تم إرسال رابط التوثيق مجدداً إلى بريدك الإلكتروني.',
-        ], 200);
+        return response()->json(['message' => 'تم إرسال رابط التوثيق مجدداً إلى بريدك الإلكتروني.'], 200);
     }
 
     // ══════════════════════════════════════════════════════════
     // 3. فحص حالة توثيق البريد الإلكتروني (Polling)
-    //    Route: GET /auth/email-verification-status
-    //    يقبل: email (query param)
+    //    GET /auth/email-verification-status?email=...
     //    Flutter يستدعيه كل 5 ثوانٍ للتحقق من اكتمال التوثيق
     // ══════════════════════════════════════════════════════════
-    public function checkEmailVerificationStatus(Request $request)
+    public function checkEmailVerificationStatus(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'email' => 'required|email',
@@ -126,19 +143,17 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
             return response()->json(['message' => 'المستخدم غير موجود.'], 404);
         }
 
-        return response()->json([
-            'email_verified' => $user->hasVerifiedEmail(),
-        ], 200);
+        return response()->json(['email_verified' => $user->hasVerifiedEmail()], 200);
     }
 
     // ══════════════════════════════════════════════════════════
     // 4. توثيق رقم الهاتف عبر الـ OTP
-    //    Route: POST /verify-otp
+    //    POST /verify-otp
     //    يقبل: phone + otp
     //    شرط: يجب أن يكون البريد موثّقاً أولاً
     //    Returns: {access_token, user}
     // ══════════════════════════════════════════════════════════
-    public function verifyOtp(Request $request)
+    public function verifyOtp(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'phone' => 'required|string',
@@ -181,7 +196,6 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
         $user->phone_otp_expires_at = null;
         $user->save();
 
-        // توليد توكن الدخول (Sanctum)
         $token = $user->createToken('auth_token')->plainTextToken;
 
         return response()->json([
@@ -194,10 +208,10 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
 
     // ══════════════════════════════════════════════════════════
     // 5. إعادة إرسال OTP الهاتف
-    //    Route: POST /auth/resend-otp
+    //    POST /auth/resend-otp
     //    يقبل: phone
     // ══════════════════════════════════════════════════════════
-    public function resendOtp(Request $request)
+    public function resendOtp(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'phone' => 'required|string',
@@ -209,6 +223,16 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
+        // Rate limiting: منع الإفراط في طلب OTP
+        $rateLimitKey = 'resend-otp:' . $request->phone;
+        if (RateLimiter::tooManyAttempts($rateLimitKey, self::OTP_RESEND_LIMIT)) {
+            $seconds = RateLimiter::availableIn($rateLimitKey);
+            return response()->json([
+                'message' => "طلبات كثيرة جداً. حاول بعد {$seconds} ثانية.",
+            ], 429);
+        }
+        RateLimiter::hit($rateLimitKey, self::OTP_RESEND_DECAY);
+
         $user = User::where('phone', $request->phone)->first();
 
         if (!$user) {
@@ -219,79 +243,91 @@ Log::info("رمز التوثيق الجديد للمستخدم هو: " . $otp);
             return response()->json(['message' => 'رقم الهاتف موثّق مسبقاً.'], 200);
         }
 
-        // يجب توثيق البريد قبل إعادة إرسال OTP الهاتف
         if (!$user->hasVerifiedEmail()) {
-            return response()->json([
-                'message' => 'يرجى توثيق بريدك الإلكتروني أولاً.',
-            ], 403);
+            return response()->json(['message' => 'يرجى توثيق بريدك الإلكتروني أولاً.'], 403);
         }
 
-        $otp = rand(100000, 999999);
+        $otp = $this->generateOtp();
 
         $user->phone_otp            = Hash::make($otp);
-        $user->phone_otp_expires_at = Carbon::now()->addMinutes(10);
+        $user->phone_otp_expires_at = Carbon::now()->addMinutes(self::OTP_EXPIRY_MINUTES);
         $user->save();
 
+        Log::info("OTP جديد للمستخدم [{$user->phone}]: {$otp}");
+
         // في الإنتاج: أرسل $otp عبر Twilio
-        return response()->json([
-            'message'  => 'تم إرسال رمز جديد إلى رقم هاتفك.',
-            'test_otp' => $otp, // ← احذف في الإنتاج
-        ], 200);
+        $response = ['message' => 'تم إرسال رمز جديد إلى رقم هاتفك.'];
+
+        if (app()->environment('local')) {
+            $response['test_otp'] = $otp;
+        }
+
+        return response()->json($response, 200);
     }
 
     // ══════════════════════════════════════════════════════════
     // 6. تسجيل الدخول
-    //    Route: POST /login
-    //    يقبل: phone + password
+    //    POST /login
+    //    يقبل: email + password
     //    يشترط: توثيق البريد + توثيق الهاتف
     // ══════════════════════════════════════════════════════════
-    // داخل ملف app/Http/Controllers/AuthController.php
-public function login(Request $request)
-{
-    // 1. التحقق من البريد الإلكتروني
-    $validator = Validator::make($request->all(), [
-        'email'    => 'required|string|email',
-        'password' => 'required|string',
-    ], [
-        'email.required'    => 'البريد الإلكتروني مطلوب.',
-        'email.email'       => 'صيغة البريد الإلكتروني غير صحيحة.',
-        'password.required' => 'كلمة المرور مطلوبة.',
-    ], []); // المصفوفة الرابعة الفارغة لحل خطأ P1005
+    public function login(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'email'    => 'required|string|email',
+            'password' => 'required|string',
+        ], [
+            'email.required'    => 'البريد الإلكتروني مطلوب.',
+            'email.email'       => 'صيغة البريد الإلكتروني غير صحيحة.',
+            'password.required' => 'كلمة المرور مطلوبة.',
+        ]);
 
-    if ($validator->fails()) {
-        return response()->json(['errors' => $validator->errors()], 422);
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        // Rate limiting لمنع Brute Force
+        $rateLimitKey = 'login:' . Str::lower($request->email) . '|' . $request->ip();
+        if (RateLimiter::tooManyAttempts($rateLimitKey, self::LOGIN_LIMIT)) {
+            $seconds = RateLimiter::availableIn($rateLimitKey);
+            return response()->json([
+                'message' => "محاولات كثيرة جداً. حاول بعد {$seconds} ثانية.",
+            ], 429);
+        }
+
+        $user = User::where('email', $request->email)->first();
+
+        if (!$user || !Hash::check($request->password, $user->password)) {
+            RateLimiter::hit($rateLimitKey, self::LOGIN_DECAY);
+            return response()->json(['message' => 'بيانات الدخول غير صحيحة.'], 401);
+        }
+
+        // نجح التحقق — نصفّر العداد
+        RateLimiter::clear($rateLimitKey);
+
+        if (!$user->hasVerifiedEmail()) {
+            return response()->json(['message' => 'يرجى توثيق بريدك الإلكتروني أولاً.'], 403);
+        }
+
+        if (!$user->phone_verified_at) {
+            return response()->json(['message' => 'يرجى توثيق رقم الهاتف أولاً.'], 403);
+        }
+
+        $token = $user->createToken('auth_token')->plainTextToken;
+
+        return response()->json([
+            'message'      => 'تم تسجيل الدخول بنجاح.',
+            'access_token' => $token,
+            'token_type'   => 'Bearer',
+            'user'         => $user,
+        ], 200);
     }
-
-    // 2. البحث عن المستخدم بواسطة البريد
-    $user = User::where('email', $request->email)->first();
-
-    if (!$user || !Hash::check($request->password, $user->password)) {
-        return response()->json(['message' => 'بيانات الدخول غير صحيحة.'], 401);
-    }
-
-    // 3. التحقق من التوثيق
-    if (!$user->hasVerifiedEmail()) {
-        return response()->json(['message' => 'يرجى توثيق بريدك الإلكتروني أولاً.'], 403);
-    }
-
-    if (!$user->phone_verified_at) {
-        return response()->json(['message' => 'يرجى توثيق رقم الهاتف أولاً.'], 403);
-    }
-
-    $token = $user->createToken('auth_token')->plainTextToken;
-
-    return response()->json([
-        'message'      => 'تم تسجيل الدخول بنجاح.',
-        'access_token' => $token,
-        'user'         => $user,
-    ], 200);
-}
 
     // ══════════════════════════════════════════════════════════
     // 7. تحديث رمز إشعارات FCM
-    //    Route: POST /user/fcm-token  (requires auth:sanctum)
+    //    POST /update-fcm-token  (requires auth:sanctum)
     // ══════════════════════════════════════════════════════════
-    public function updateFcmToken(Request $request)
+    public function updateFcmToken(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'fcm_token' => 'required|string',
@@ -308,8 +344,18 @@ public function login(Request $request)
         $user->fcm_token = $request->fcm_token;
         $user->save();
 
-        return response()->json([
-            'message' => 'تم تحديث رمز الإشعارات بنجاح.',
-        ], 200);
+        return response()->json(['message' => 'تم تحديث رمز الإشعارات بنجاح.'], 200);
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // HELPERS
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * توليد رمز OTP عشوائي من 6 أرقام باستخدام random_int الآمن
+     */
+    private function generateOtp(): int
+    {
+        return random_int(100000, 999999);
     }
 }
