@@ -11,6 +11,7 @@ use App\Http\Controllers\CharityFundController;
 use App\Http\Controllers\FundTransferController;
 use App\Http\Controllers\SettingController;
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminHistoricalPaymentController;
 use App\Models\Payment;
 use App\Models\User;
 
@@ -244,7 +245,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/app-fund',           [AppFundController::class, 'index']);
         Route::get('/charity-fund',       [CharityFundController::class, 'index']);
         Route::get('/transfers-history',  [FundTransferController::class, 'index']);
-    });
+   Route::get('/subscribers-list', [AdminHistoricalPaymentController::class, 'subscribersList']);
+    Route::get('/subscriber-payments/{userId}', [AdminHistoricalPaymentController::class, 'subscriberPayments']);
+    Route::post('/mark-historical-paid', [AdminHistoricalPaymentController::class, 'markHistoricalPaid']);
+        });
 
     Route::middleware('IsAdmin')->prefix('admin')->group(function () {
         Route::post('/settings/commission', [SettingController::class, 'updateCommission']);
