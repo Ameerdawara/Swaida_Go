@@ -15,7 +15,7 @@ class PaymentController extends Controller
 {
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Helper: إرسال إشعار للأدمن (مشترك بين webhook الحقيقي والـ mock)
+    // Helper: إرسال إشعار للأدمن + حفظه في جدول notifications
     // ─────────────────────────────────────────────────────────────────────────
     private function notifyAdmin(float $totalPaid, string $payerName): void
     {
@@ -27,27 +27,49 @@ class PaymentController extends Controller
                 return;
             }
 
-            if (empty($admin->fcm_token)) {
+            $title   = 'إشعار دفع جديد 💰';
+            $message = "قام {$payerName} بدفع مبلغ " . number_format($totalPaid, 2) . ' دولار.';
+
+            // ── 1. إرسال FCM Push Notification ──────────────────────────────
+            if (!empty($admin->fcm_token)) {
+                $fcm    = app(\App\Services\FCMService::class);
+                $result = $fcm->sendToDevice(
+                    $admin->fcm_token,
+                    $title,
+                    $message,
+                    ['type' => 'admin_payment_received']
+                );
+
+                Log::info('[FCM] نتيجة إشعار الأدمن', [
+                    'success'    => $result ? 'ناجح' : 'فشل',
+                    'payer'      => $payerName,
+                    'total_paid' => $totalPaid,
+                ]);
+            } else {
                 Log::warning('[FCM] توكن الأدمن فارغ.', ['admin_id' => $admin->id]);
-                return;
             }
 
-            $fcm    = app(\App\Services\FCMService::class);
-            $result = $fcm->sendToDevice(
-                $admin->fcm_token,
-                'إشعار إداري: دفع جديد 💰',
-                "قام {$payerName} بدفع مبلغ " . number_format($totalPaid, 2) . ' دولار.',
-                ['type' => 'admin_payment_received']
-            );
+            // ── 2. حفظ الإشعار في جدول notifications ────────────────────────
+            $admin->notifications()->create([
+                'id'   => \Illuminate\Support\Str::uuid(),
+                'type' => 'admin_payment_received',
+                'data' => [
+                    'title'      => $title,
+                    'body'       => $message,
+                    'type'       => 'admin_payment_received',
+                    'payer_name' => $payerName,
+                    'amount'     => $totalPaid,
+                ]
+            ]);
 
-            Log::info('[FCM] نتيجة إشعار الأدمن', [
-                'success'    => $result ? 'ناجح' : 'فشل',
+            Log::info('[DB] تم حفظ الإشعار في قاعدة البيانات', [
+                'admin_id'   => $admin->id,
                 'payer'      => $payerName,
                 'total_paid' => $totalPaid,
             ]);
 
         } catch (\Exception $e) {
-            Log::error('[FCM] خطأ أثناء إرسال إشعار الأدمن: ' . $e->getMessage());
+            Log::error('[notifyAdmin] خطأ: ' . $e->getMessage());
         }
     }
 
@@ -232,11 +254,9 @@ class PaymentController extends Controller
 
     // ─────────────────────────────────────────────────────────────────────────
     // mockSuccess — يحاكي نجاح الدفع في بيئة local بدون Paddle
-    // الـ Route: GET /api/payment/mock-success?payment_ids=1,2,3
     // ─────────────────────────────────────────────────────────────────────────
     public function mockSuccess(Request $request)
     {
-        // تأكد أننا في بيئة local فقط
         if (!app()->environment('local')) {
             return response()->json(['message' => 'غير متاح'], 403);
         }
@@ -257,7 +277,7 @@ class PaymentController extends Controller
             return response()->json(['message' => 'فشل معالجة الدفع', 'error' => $e->getMessage()], 500);
         }
 
-        // إرسال إشعار الأدمن بعد commit ✅
+        // إرسال إشعار الأدمن + حفظه في DB بعد commit ✅
         $this->notifyAdmin($result['total_paid'], $result['payer_name']);
 
         return response()->json([
@@ -280,7 +300,6 @@ class PaymentController extends Controller
         $signature = $request->header('Paddle-Signature');
         $body      = $request->getContent();
 
-        // التحقق من التوقيع
         $parts = [];
         foreach (explode(';', $signature) as $part) {
             [$k, $v] = explode('=', $part, 2);
@@ -291,7 +310,6 @@ class PaymentController extends Controller
         $h1     = $parts['h1'] ?? '';
         $signed = $ts . ':' . $body;
 
-        // ✅ استخدام webhook_secret وليس secret_key
         $expected = hash_hmac('sha256', $signed, config('services.paddle.webhook_secret'));
 
         if (!hash_equals($expected, $h1)) {
@@ -317,7 +335,7 @@ class PaymentController extends Controller
             return response()->json(['message' => 'فشل معالجة الدفع', 'error' => $e->getMessage()], 500);
         }
 
-        // إرسال إشعار الأدمن بعد commit ✅
+        // إرسال إشعار الأدمن + حفظه في DB بعد commit ✅
         $this->notifyAdmin($result['total_paid'], $result['payer_name']);
 
         return response()->json(['message' => 'تم معالجة الدفع بنجاح وتحديث الصندوق'], 200);
