@@ -14,7 +14,32 @@ use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminHistoricalPaymentController;
 use App\Models\Payment;
 use App\Models\User;
+use App\Services\FCMService;
+Route::get('/test-notification-public', function () {
+    
+    // جلب آخر مستخدم لديه توكن مسجل في قاعدة البيانات
+    $user = User::whereNotNull('fcm_token')->latest()->first();
+    
+    if (!$user) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'لم يتم العثور على أي مستخدم لديه fc_token في قاعدة البيانات!'
+        ], 404);
+    }
 
+    $fcm = app(FCMService::class);
+    $result = $fcm->sendToDevice(
+        $user->fcm_token,
+        'تجربة عامة ناجحة! 📢',
+        'أهلاً ' . $user->full_name . '، تم إرسال هذا الإشعار بدون الحاجة لتوكن تسجيل دخول.'
+    );
+
+    return response()->json([
+        'status' => 'success',
+        'sent_to_user' => $user->full_name,
+        'fcm_result' => $result
+    ]);
+});
 /*
 |--------------------------------------------------------------------------
 | API Routes - Swaida Go
