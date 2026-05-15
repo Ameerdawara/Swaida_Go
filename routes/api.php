@@ -17,26 +17,26 @@ use App\Models\User;
 use App\Services\FCMService;
 Route::get('/test-notification-public', function () {
     
-    // جلب آخر مستخدم لديه توكن مسجل في قاعدة البيانات
-    $user = User::whereNotNull('fcm_token')->latest()->first();
+    // ابحث عن حسابك الشخصي حصراً لتتأكد من وصول الإشعار لجهازك
+    $user = User::where('email', 'admin@gmail.com')->first(); // ضع إيميلك هنا
     
-    if (!$user) {
+    if (!$user || !$user->fcm_token) {
         return response()->json([
             'status' => 'error',
-            'message' => 'لم يتم العثور على أي مستخدم لديه fc_token في قاعدة البيانات!'
+            'message' => 'مستخدمك الحالي ليس لديه توكن مسجل في قاعدة البيانات!'
         ], 404);
     }
 
     $fcm = app(FCMService::class);
     $result = $fcm->sendToDevice(
         $user->fcm_token,
-        'تجربة عامة ناجحة! 📢',
-        'أهلاً ' . $user->full_name . '، تم إرسال هذا الإشعار بدون الحاجة لتوكن تسجيل دخول.'
+        'وصلتني يا أمير! 🚀',
+        'هذا الإشعار مرسل لحسابك الشخصي للتأكد من الربط.'
     );
 
     return response()->json([
         'status' => 'success',
-        'sent_to_user' => $user->full_name,
+        'sent_to' => $user->full_name,
         'fcm_result' => $result
     ]);
 });
@@ -152,17 +152,21 @@ if (app()->environment('local')) {
         try {
             $payments = \App\Models\Payment::whereIn('id', $paymentIds)
                 ->whereNull('paid_at')
+                ->with('subscription.user')
                 ->get();
+
+            $totalPaid = 0;
 
             foreach ($payments as $payment) {
                 $payment->status              = 'paid';
                 $payment->paid_at             = \Carbon\Carbon::now();
                 $payment->payment_gateway_ref = 'MOCK-' . strtoupper(\Illuminate\Support\Str::random(8));
                 $payment->save();
+                $totalPaid += $payment->amount;
             }
 
             $appFund = \App\Models\AppFund::firstOrCreate(['id' => 1]);
-            $appFund->balance     += $payments->sum('amount');
+            $appFund->balance     += $totalPaid;
             $appFund->last_updated = \Carbon\Carbon::now();
             $appFund->save();
 
@@ -171,6 +175,34 @@ if (app()->environment('local')) {
             \Illuminate\Support\Facades\DB::rollBack();
             return response()->json(['message' => 'فشل: ' . $e->getMessage()], 500);
         }
+
+        // ── إرسال إشعار للأدمن بعد commit ✅ ──────────────────
+        try {
+            $admin = User::where('email', 'admin@gmail.com')->first();
+
+            if ($admin && $admin->fcm_token) {
+                $payer     = $payments->first()->subscription?->user;
+                $payerName = $payer?->full_name ?? 'مستخدم مجهول';
+
+                $fcm = app(FCMService::class);
+                $fcm->sendToDevice(
+                    $admin->fcm_token,
+                    'إشعار إداري: دفع جديد 💰',
+                    "قام {$payerName} بدفع مبلغ " . number_format($totalPaid, 2) . ' دولار.',
+                    ['type' => 'admin_payment_received']
+                );
+
+                \Illuminate\Support\Facades\Log::info('[MOCK] تم إرسال إشعار الأدمن', [
+                    'payer'      => $payerName,
+                    'total_paid' => $totalPaid,
+                ]);
+            } else {
+                \Illuminate\Support\Facades\Log::warning('[MOCK] الأدمن غير موجود أو التوكن فارغ');
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('[MOCK] فشل إشعار الأدمن: ' . $e->getMessage());
+        }
+        // ────────────────────────────────────────────────────────
 
         // Flutter يكتشف /payment/success ويعمل go('/confirmation')
         return redirect(url('/api/payment/success?session_id=mock_' . time()));

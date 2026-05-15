@@ -44,6 +44,7 @@ class CheckOverduePayments extends Command
             $payment->update(['status' => 'overdue']);
 
             // 2. إرسال الإشعار
+            
             if ($user->fcm_token) {
                 $this->fcmService->sendToDevice(
                     $user->fcm_token,
