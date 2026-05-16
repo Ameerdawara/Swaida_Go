@@ -12,34 +12,8 @@ use App\Http\Controllers\FundTransferController;
 use App\Http\Controllers\SettingController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminHistoricalPaymentController;
-use App\Http\Controllers\NotificationController;
 use App\Models\Payment;
 use App\Models\User;
-use App\Services\FCMService;
-
-Route::get('/test-notification-public', function () {
-    $user = User::where('email', 'admin@gmail.com')->first();
-
-    if (!$user || !$user->fcm_token) {
-        return response()->json([
-            'status'  => 'error',
-            'message' => 'مستخدمك الحالي ليس لديه توكن مسجل في قاعدة البيانات!'
-        ], 404);
-    }
-
-    $fcm    = app(FCMService::class);
-    $result = $fcm->sendToDevice(
-        $user->fcm_token,
-        'وصلتني يا أمير! 🚀',
-        'هذا الإشعار مرسل لحسابك الشخصي للتأكد من الربط.'
-    );
-
-    return response()->json([
-        'status'     => 'success',
-        'sent_to'    => $user->full_name,
-        'fcm_result' => $result
-    ]);
-});
 
 /*
 |--------------------------------------------------------------------------
@@ -75,9 +49,10 @@ Route::post('/auth/resend-otp', [AuthController::class, 'resendOtp']);
 Route::post('/payment/webhook', [PaymentController::class, 'webhook']);
 
 // ── Mock payment — للتطوير المحلي فقط ──────────────────────
+// هذه المسارات عامة (بدون auth) لأن الـ WebView يفتحها كمتصفح
 if (app()->environment('local')) {
 
-    // STEP 1: صفحة تأكيد HTML
+    // STEP 1: يعرض صفحة تأكيد HTML — المستخدم يختار تأكيد أو إلغاء
     Route::get('/payment/mock-success', function (Request $request) {
         $paymentIds = $request->query('payment_ids', '');
         $ids        = array_filter(explode(',', $paymentIds));
@@ -140,7 +115,7 @@ if (app()->environment('local')) {
         ', 200, ['Content-Type' => 'text/html; charset=UTF-8']);
     });
 
-    // STEP 2: تنفيذ الدفع + حفظ الإشعار في DB + redirect لصفحة النجاح
+    // STEP 2: ينفّذ الدفع فعلاً بعد تأكيد المستخدم
     Route::get('/payment/mock-confirm', function (Request $request) {
         $paymentIds = array_filter(explode(',', $request->query('payment_ids', '')));
 
@@ -148,26 +123,22 @@ if (app()->environment('local')) {
             return response()->json(['message' => 'لا توجد معرّفات دفعات'], 400);
         }
 
-        // ── معالجة الدفع ─────────────────────────────────────────────────────
         \Illuminate\Support\Facades\DB::beginTransaction();
         try {
             $payments = \App\Models\Payment::whereIn('id', $paymentIds)
                 ->whereNull('paid_at')
-                ->with('subscription.user')
                 ->get();
-
-            $totalPaid = 0;
 
             foreach ($payments as $payment) {
                 $payment->status              = 'paid';
                 $payment->paid_at             = \Carbon\Carbon::now();
+                // رقم مرجعي واضح يظهر كـ receipt number
                 $payment->payment_gateway_ref = 'MOCK-' . strtoupper(\Illuminate\Support\Str::random(8));
                 $payment->save();
-                $totalPaid += $payment->amount;
             }
 
-            $appFund               = \App\Models\AppFund::firstOrCreate(['id' => 1]);
-            $appFund->balance     += $totalPaid;
+            $appFund = \App\Models\AppFund::firstOrCreate(['id' => 1]);
+            $appFund->balance     += $payments->sum('amount');
             $appFund->last_updated = \Carbon\Carbon::now();
             $appFund->save();
 
@@ -177,60 +148,25 @@ if (app()->environment('local')) {
             return response()->json(['message' => 'فشل: ' . $e->getMessage()], 500);
         }
 
-        // ── إرسال إشعار + حفظه في DB ─────────────────────────────────────────
-        try {
-            $admin     = User::where('email', 'admin@gmail.com')->first();
-            $payer     = $payments->first()->subscription?->user;
-            $payerName = $payer?->full_name ?? 'مستخدم مجهول';
-
-            if ($admin) {
-                $title   = 'إشعار إداري: دفع جديد 💰';
-                $body    = "قام {$payerName} بدفع مبلغ " . number_format($totalPaid, 2) . ' دولار.';
-
-                // 1. FCM Push
-                if (!empty($admin->fcm_token)) {
-                    $fcm = app(FCMService::class);
-                    $fcm->sendToDevice(
-                        $admin->fcm_token,
-                        $title,
-                        $body,
-                        ['type' => 'admin_payment_received']
-                    );
-                }
-
-                // 2. حفظ في جدول notifications
-                // ⚠️ data يُخزَّن كـ array مباشرة — Laravel يتولى json_encode تلقائياً
-                $admin->notifications()->create([
-                    'id'   => \Illuminate\Support\Str::uuid(),
-                    'type' => 'admin_payment_received',
-                    'data' => [
-                        'title'      => $title,
-                        'body'       => $body,
-                        'type'       => 'admin_payment_received',
-                        'payer_name' => $payerName,
-                        'amount'     => $totalPaid,
-                    ],
-                ]);
-
-                \Illuminate\Support\Facades\Log::info('[MOCK] تم إرسال وحفظ إشعار الأدمن', [
-                    'payer'      => $payerName,
-                    'total_paid' => $totalPaid,
-                ]);
-            } else {
-                \Illuminate\Support\Facades\Log::warning('[MOCK] الأدمن غير موجود');
-            }
-        } catch (\Exception $e) {
-            \Illuminate\Support\Facades\Log::error('[MOCK] فشل إشعار الأدمن: ' . $e->getMessage());
-        }
-
-        // ── redirect لصفحة النجاح — Flutter يكتشفها ويعمل go('/confirmation') ─
+        // ⚠️ مهم: Flutter يكتشف النجاح عبر _successUrlPattern = '/payment/success'
+        // لذلك الـ redirect يجب أن يحتوي هذا المسار بالضبط
         return redirect(url('/api/payment/success?session_id=mock_' . time()));
     });
 
-    // مسار الإلغاء
+    // مسار الإلغاء — Flutter يكتشف /payment/cancel ويعود لـ /home
     Route::get('/payment/cancel', function () {
         return response(
             '<h3 style="text-align:center;margin-top:40px;font-family:Arial;color:#ef4444">تم إلغاء الدفع</h3>',
+            200,
+            ['Content-Type' => 'text/html; charset=UTF-8']
+        );
+    });
+
+    // مسار النجاح — Flutter يكتشف /payment/success بالـ URL ويتنقل لـ /confirmation
+    // هذا المسار لا يُعالج الدفع (تم ذلك في mock-confirm) بل فقط للـ redirect
+    Route::get('/payment/success', function (Request $request) {
+        return response(
+            '<h3 style="text-align:center;margin-top:40px;font-family:Arial;color:#2d6a4f">تم الدفع بنجاح ✅</h3>',
             200,
             ['Content-Type' => 'text/html; charset=UTF-8']
         );
@@ -304,6 +240,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::prefix('payment')->group(function () {
         Route::post('/initiate', [PaymentController::class, 'initiate']);
+        Route::get('/latest-receipt', [PaymentController::class, 'latestReceipt']);
     });
 
     Route::get('/settings/commission', [SettingController::class, 'getCommission']);
@@ -321,21 +258,13 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/app-fund',           [AppFundController::class, 'index']);
         Route::get('/charity-fund',       [CharityFundController::class, 'index']);
         Route::get('/transfers-history',  [FundTransferController::class, 'index']);
-        Route::get('/subscribers-list',   [AdminHistoricalPaymentController::class, 'subscribersList']);
-        Route::get('/subscriber-payments/{userId}', [AdminHistoricalPaymentController::class, 'subscriberPayments']);
-        Route::post('/mark-historical-paid', [AdminHistoricalPaymentController::class, 'markHistoricalPaid']);
-    });
+   Route::get('/subscribers-list', [AdminHistoricalPaymentController::class, 'subscribersList']);
+    Route::get('/subscriber-payments/{userId}', [AdminHistoricalPaymentController::class, 'subscriberPayments']);
+    Route::post('/mark-historical-paid', [AdminHistoricalPaymentController::class, 'markHistoricalPaid']);
+        });
 
     Route::middleware('IsAdmin')->prefix('admin')->group(function () {
-        Route::post('/settings/commission',       [SettingController::class, 'updateCommission']);
+        Route::post('/settings/commission', [SettingController::class, 'updateCommission']);
         Route::post('/payments/mark-manual-paid', [PaymentController::class, 'markPreviousMonthsAsPaid']);
     });
-
-    // -----------------------------------------------------------
-    // 4. مسارات الإشعارات
-    // -----------------------------------------------------------
-    Route::get('/notifications',          [NotificationController::class, 'index']);
-    Route::get('/notifications/unread',   [NotificationController::class, 'unread']);
-    Route::post('/notifications/{id}/read', [NotificationController::class, 'markAsRead']);
-    Route::post('/notifications/read-all',  [NotificationController::class, 'markAllAsRead']);
 });
