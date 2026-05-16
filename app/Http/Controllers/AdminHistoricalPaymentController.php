@@ -162,12 +162,13 @@ $monthlyAmountToSave = $request->custom_amount ?? ($subscription ? $subscription
                             'subscription_id'      => $subscription->id,
                             'month_number'         => $monthNumber,
                             'year'                 => $year,
-'amount'               => $monthlyAmountToSave, // القيمة الجديدة                            'status'               => 'paid',
+                            'amount'               => $monthlyAmountToSave,
+                            'status'               => 'paid',
                             'paid_at'              => $paidAt,
                             'note'                 => $request->note ?? 'تسجيل يدوي بواسطة المدير',
                         ]);
                         $createdCount++;
-                        $totalAmount += (float) $subscription->monthly_amount;
+                        $totalAmount += (float) $monthlyAmountToSave;
                     }
                 }
             }

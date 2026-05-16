@@ -28,10 +28,12 @@ return [
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
     'paddle' => [
-    'secret_key' => env('PADDLE_SECRET_KEY'),
-    'public_key' => env('PADDLE_PUBLIC_KEY'),
-    'env'        => env('PADDLE_ENV', 'sandbox'),
-    ],
+    'secret_key'     => env('PADDLE_SECRET_KEY'),
+    'public_key'     => env('PADDLE_PUBLIC_KEY'),
+    'env'            => env('PADDLE_ENV', 'sandbox'),
+    'webhook_secret' => env('PADDLE_WEBHOOK_SECRET'),  // ← أضف هذا
+    'price_id'       => env('PADDLE_PRICE_ID'),        // ← أضف هذا
+],
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),

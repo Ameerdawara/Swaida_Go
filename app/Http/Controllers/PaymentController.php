@@ -115,6 +115,11 @@ class PaymentController extends Controller
 
     // ─────────────────────────────────────────────────────────────────────────
     // createPaddleCheckout
+    // يدعم Paddle Billing v2 (2024+)
+    // المطلوب مسبقاً في Paddle Dashboard:
+    //   1. أنشئ Product → احصل على product_id
+    //   2. أنشئ Price لهذا الـ Product → احصل على price_id
+    //   3. ضع PADDLE_PRICE_ID في .env
     // ─────────────────────────────────────────────────────────────────────────
     private function createPaddleCheckout(float $amount, array $paymentIds, int $userId): string
     {
@@ -123,33 +128,75 @@ class PaymentController extends Controller
             ? 'https://sandbox-api.paddle.com'
             : 'https://api.paddle.com';
 
-        $response = Http::withHeaders([
-                'Authorization' => 'Bearer ' . config('services.paddle.secret_key'),
-                'Content-Type'  => 'application/json',
-            ])
-            ->post("{$baseUrl}/transactions", [
-                'items' => [[
-                    'price' => [
-                        'description' => 'رسوم الاشتراك الشهري',
-                        'unit_price'  => ['amount' => (string) round($amount * 100), 'currency_code' => 'USD'],
-                        'tax_mode'    => 'exclusive',
+        $priceId = config('services.paddle.price_id'); // من .env → PADDLE_PRICE_ID
+
+        // ── الطريقة 1: استخدام Price ID ثابت (الأسهل والأنصح) ──
+        // تُنشئ Price بقيمة ثابتة في Dashboard وتضع الـ ID هنا
+        if ($priceId) {
+            $response = Http::withHeaders([
+                    'Authorization' => 'Bearer ' . config('services.paddle.secret_key'),
+                    'Content-Type'  => 'application/json',
+                ])
+                ->post("{$baseUrl}/transactions", [
+                    'items' => [[
+                        'price_id' => $priceId,
+                        'quantity' => 1,
+                    ]],
+                    'custom_data' => [
+                        'payment_ids' => $paymentIds,
+                        'user_id'     => $userId,
                     ],
-                    'quantity' => 1,
-                ]],
-                'custom_data' => [
-                    'payment_ids' => $paymentIds,
-                    'user_id'     => $userId,
-                ],
-                'success_url' => url('/payment/success?session_id={checkout.id}'),
-                'cancel_url'  => url('/payment/cancel'),
-            ]);
+                    'checkout' => [
+                        'url' => url('/api/payment/success?session_id={checkout.id}'),
+                    ],
+                    'currency_code' => 'USD',
+                ]);
+        } else {
+            // ── الطريقة 2: سعر مخصص (custom price) — بدون Price ID ──
+            // تعمل مع Paddle Billing v2 عبر catalog=false
+            $response = Http::withHeaders([
+                    'Authorization' => 'Bearer ' . config('services.paddle.secret_key'),
+                    'Content-Type'  => 'application/json',
+                ])
+                ->post("{$baseUrl}/transactions", [
+                    'items' => [[
+                        'price' => [
+                            'description' => 'رسوم الاشتراك الشهري',
+                            'product'     => [
+                                'name'        => 'اشتراك شهري',
+                                'tax_category' => 'standard',
+                            ],
+                            'unit_price' => [
+                                'amount'        => (string) round($amount * 100), // بالسنت
+                                'currency_code' => 'USD',
+                            ],
+                            'tax_mode' => 'exclusive',
+                        ],
+                        'quantity' => 1,
+                    ]],
+                    'custom_data' => [
+                        'payment_ids' => $paymentIds,
+                        'user_id'     => $userId,
+                    ],
+                    'checkout' => [
+                        'url' => url('/api/payment/success?session_id={checkout.id}'),
+                    ],
+                    'currency_code' => 'USD',
+                ]);
+        }
 
         Log::info('Paddle API Response', [
-            'status' => $response->status(),
-            'body'   => $response->json(),
+            'status'    => $response->status(),
+            'body'      => $response->json(),
+            'price_id'  => $priceId ?? 'custom',
+            'sandbox'   => $isSandbox,
         ]);
 
         if (!$response->successful()) {
+            Log::error('Paddle API Error', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
             throw new \Exception(
                 'فشل الاتصال بـ Paddle: ' . $response->status() . ' — ' . $response->body()
             );
@@ -157,11 +204,13 @@ class PaymentController extends Controller
 
         $json = $response->json();
 
+        // Paddle v2 يُعيد checkout URL هنا
         $checkoutUrl = $json['data']['checkout']['url']
             ?? $json['data']['url']
             ?? null;
 
         if (!$checkoutUrl) {
+            Log::error('Paddle: لم يرجع checkout URL', ['response' => $json]);
             throw new \Exception(
                 'لم يتم الحصول على رابط الدفع من Paddle. الاستجابة: ' . json_encode($json)
             );
@@ -339,6 +388,39 @@ class PaymentController extends Controller
         $this->notifyAdmin($result['total_paid'], $result['payer_name']);
 
         return response()->json(['message' => 'تم معالجة الدفع بنجاح وتحديث الصندوق'], 200);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // latestReceipt — آخر دفعة مكتملة للمستخدم الحالي (لصفحة التأكيد)
+    // GET /api/payment/latest-receipt
+    // ─────────────────────────────────────────────────────────────────────────
+    public function latestReceipt(Request $request)
+    {
+        $user         = $request->user();
+        $subscription = $user->subscription;
+
+        if (!$subscription) {
+            return response()->json(['message' => 'لا يوجد اشتراك'], 404);
+        }
+
+        // آخر دفعة مكتملة مرتبة بوقت الدفع
+        $payment = Payment::where('subscription_id', $subscription->id)
+            ->whereNotNull('paid_at')
+            ->orderBy('paid_at', 'desc')
+            ->first();
+
+        if (!$payment) {
+            return response()->json(['message' => 'لا توجد دفعات مكتملة'], 404);
+        }
+
+        return response()->json([
+            'id'             => $payment->id,
+            'months'         => [$payment->month_number],
+            'amount'         => (float) $payment->amount,
+            'paid_at'        => $payment->paid_at,
+            'receipt_number' => $payment->payment_gateway_ref
+                ?? 'REC-' . str_pad($payment->id, 6, '0', STR_PAD_LEFT),
+        ]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
