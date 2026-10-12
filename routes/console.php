@@ -7,6 +7,10 @@ use Mailtrap\MailtrapClient;
 use Mailtrap\Mime\MailtrapEmail;
 use Symfony\Component\Mime\Address;
 
+use Illuminate\Support\Facades\Schedule;
+
+
+Schedule::command('payments:check-overdue')->dailyAt('12:00');
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');

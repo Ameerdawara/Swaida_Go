@@ -8,20 +8,21 @@ use Illuminate\Database\Seeder;
 
 class DatabaseSeeder extends Seeder
 {
-    use WithoutModelEvents;
+    
 
     /**
      * Seed the application's database.
      */
     public function run(): void
     {
-        // User::factory(10)->create();
-          $this->call([
-        AdminSeeder::class,
-    ]);
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
+        $this->call([
+            AdminSeeder::class,
         ]);
+
+        User::factory()->state([
+            'full_name' => 'Test User',
+            'email' => 'test@example.com',
+            'phone' => '0999999999',
+        ])->create();
     }
 }

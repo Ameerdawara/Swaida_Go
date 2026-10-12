@@ -3,7 +3,6 @@
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
-// استيراد جميع المتحكمات (Controllers)
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\SubscriptionController;
 use App\Http\Controllers\PaymentController;
@@ -11,8 +10,36 @@ use App\Http\Controllers\AppFundController;
 use App\Http\Controllers\CharityFundController;
 use App\Http\Controllers\FundTransferController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\Admincontroller;
+use App\Http\Controllers\AdminHistoricalPaymentController;
 use App\Models\Payment;
 use App\Models\User;
+Route::get('/test-paddle', function () {
+    $response = \Illuminate\Support\Facades\Http::withHeaders([
+        'Authorization' => 'Bearer ' . config('services.tap.secret_key'),
+        'Content-Type'  => 'application/json',
+    ])->get('https://api.tap.company/v2/charges');
+
+    return response()->json([
+        'status' => $response->status(),
+        'body'   => $response->json(),
+        'key'    => config('services.tap.secret_key'),
+    ]);
+});
+Route::get('/test-admin-notify', function () {
+    $admin = \App\Models\User::where('role', 'admin')->first();
+    
+    $fcmService = app(\App\Services\FCMService::class);
+    
+    $fcmService->sendToDevice(
+        $admin->fcm_token,
+        'تجربة إشعار أدمن',
+        'هذا إشعار تجريبي للأدمن',
+        ['type' => 'test']
+    );
+    
+    return 'تم الإرسال للأدمن: ' . $admin->full_name;
+});
 /*
 |--------------------------------------------------------------------------
 | API Routes - Swaida Go
@@ -23,57 +50,154 @@ use App\Models\User;
 // 1. المسارات العامة (Public Routes)
 // -----------------------------------------------------------
 
-// مسارات المصادقة والتوثيق
-Route::post('/register', [AuthController::class, 'register']);     // تسجيل حساب جديد → يُرسل رابط البريد + OTP الهاتف
-Route::post('/login', [AuthController::class, 'login']);           // تسجيل الدخول (phone + password)
+Route::post('/register', [AuthController::class, 'register']);
+Route::post('/login',    [AuthController::class, 'login']);
 
-// ── توثيق البريد الإلكتروني ────────────────────────────────
-
-// رابط التوثيق الذي يصل للمستخدم عبر البريد (signed URL يُولّده Laravel)
-// المستخدم يضغطه من بريده → Laravel يضع email_verified_at تلقائياً
 Route::get('/email/verify/{id}/{hash}', function (Request $request, $id, $hash) {
-
-    // 1. البحث عن المستخدم عبر معرفه
     $user = User::findOrFail($id);
-
-    // 2. التحقق من أن الـ Hash المرسل يطابق بريد المستخدم
     if (! hash_equals((string) $hash, sha1($user->getEmailForVerification()))) {
         return response()->json(['message' => 'رابط التوثيق غير صالح أو منتهي الصلاحية.'], 403);
     }
-
-    // 3. التحقق إذا كان البريد موثقاً بالفعل
     if ($user->hasVerifiedEmail()) {
         return response()->json(['message' => 'البريد الإلكتروني موثق مسبقاً.'], 200);
     }
-
-    // 4. تنفيذ التوثيق
     if ($user->markEmailAsVerified()) {
         event(new \Illuminate\Auth\Events\Verified($user));
     }
-
-    return response()->json([
-        'message' => 'تم توثيق البريد الإلكتروني بنجاح.'
-    ], 200);
-
+    return response()->json(['message' => 'تم توثيق البريد الإلكتروني بنجاح.'], 200);
 })->middleware(['signed'])->name('verification.verify');
-// Flutter يستدعيه كل 5 ثوانٍ (Polling) لمعرفة هل وثّق المستخدم بريده
-// مثال: GET /api/auth/email-verification-status?email=user@example.com
+
 Route::get('/auth/email-verification-status', [AuthController::class, 'checkEmailVerificationStatus']);
-
-// إعادة إرسال رابط التوثيق (زر "إعادة الإرسال" في شاشة EmailVerificationScreen)
 Route::post('/auth/resend-email-verification', [AuthController::class, 'resendEmailVerification']);
-
-// ── توثيق رقم الهاتف ───────────────────────────────────────
-
-// يشترط توثيق البريد مسبقاً (Backend يرفض بـ 403 إن لم يكن كذلك)
-Route::post('/verify-otp', [AuthController::class, 'verifyOtp']);
-
-// إعادة إرسال OTP الهاتف
+Route::post('/verify-otp',      [AuthController::class, 'verifyOtp']);
 Route::post('/auth/resend-otp', [AuthController::class, 'resendOtp']);
-
-// مسار استقبال تأكيدات الدفع من البوابات الخارجية (Webhooks)
-// ملاحظة: هذا المسار يجب أن يكون مستثنى من حماية CSRF
 Route::post('/payment/webhook', [PaymentController::class, 'webhook']);
+
+// ── Mock payment — للتطوير المحلي فقط ──────────────────────
+// هذه المسارات عامة (بدون auth) لأن الـ WebView يفتحها كمتصفح
+if (app()->environment('local')) {
+
+    // STEP 1: يعرض صفحة تأكيد HTML — المستخدم يختار تأكيد أو إلغاء
+    Route::get('/payment/mock-success', function (Request $request) {
+        $paymentIds = $request->query('payment_ids', '');
+        $ids        = array_filter(explode(',', $paymentIds));
+
+        if (empty($ids)) {
+            return response()->json(['message' => 'لا توجد معرّفات دفعات'], 400);
+        }
+
+        return response('
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تأكيد الدفع</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family: Arial, sans-serif; background: #f4f7f5;
+      display:flex; align-items:center; justify-content:center;
+      min-height:100vh; padding:24px;
+    }
+    .card {
+      background:white; border-radius:20px; padding:36px 28px;
+      max-width:380px; width:100%;
+      box-shadow:0 4px 24px rgba(0,0,0,0.08); text-align:center;
+    }
+    .icon { font-size:56px; margin-bottom:16px; }
+    h2   { color:#1a3a2a; font-size:20px; margin-bottom:8px; }
+    p    { color:#6b7280; font-size:14px; margin-bottom:28px; line-height:1.6; }
+    .btn {
+      display:block; width:100%; padding:14px;
+      background:linear-gradient(135deg,#2d6a4f,#40916c);
+      color:white; border:none; border-radius:12px;
+      font-size:16px; font-weight:bold; cursor:pointer;
+      text-decoration:none; margin-bottom:12px;
+    }
+    .btn-cancel { background:none; color:#ef4444; border:1.5px solid #ef4444; }
+    .badge {
+      margin-top:20px; font-size:11px; color:#9ca3af;
+      display:flex; align-items:center; justify-content:center; gap:4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">💳</div>
+    <h2>تأكيد الدفع التجريبي</h2>
+    <p>هذه بيئة اختبار محلية.<br>اضغط "تأكيد الدفع" لمحاكاة إتمام العملية.</p>
+    <a href="/api/payment/mock-confirm?payment_ids=' . htmlspecialchars($paymentIds) . '" class="btn">
+      ✅ تأكيد الدفع
+    </a>
+    <a href="/api/payment/cancel" class="btn btn-cancel">
+      ❌ إلغاء
+    </a>
+    <div class="badge">🔒 بيئة تطوير محلية فقط</div>
+  </div>
+</body>
+</html>
+        ', 200, ['Content-Type' => 'text/html; charset=UTF-8']);
+    });
+
+    // STEP 2: ينفّذ الدفع فعلاً بعد تأكيد المستخدم
+    Route::get('/payment/mock-confirm', function (Request $request) {
+        $paymentIds = array_filter(explode(',', $request->query('payment_ids', '')));
+
+        if (empty($paymentIds)) {
+            return response()->json(['message' => 'لا توجد معرّفات دفعات'], 400);
+        }
+
+        \Illuminate\Support\Facades\DB::beginTransaction();
+        try {
+            $payments = \App\Models\Payment::whereIn('id', $paymentIds)
+                ->whereNull('paid_at')
+                ->get();
+
+            foreach ($payments as $payment) {
+                $payment->status              = 'paid';
+                $payment->paid_at             = \Carbon\Carbon::now();
+                // رقم مرجعي واضح يظهر كـ receipt number
+                $payment->payment_gateway_ref = 'MOCK-' . strtoupper(\Illuminate\Support\Str::random(8));
+                $payment->save();
+            }
+
+            $appFund = \App\Models\AppFund::firstOrCreate(['id' => 1]);
+            $appFund->balance     += $payments->sum('amount');
+            $appFund->last_updated = \Carbon\Carbon::now();
+            $appFund->save();
+
+            \Illuminate\Support\Facades\DB::commit();
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\DB::rollBack();
+            return response()->json(['message' => 'فشل: ' . $e->getMessage()], 500);
+        }
+
+        // ⚠️ مهم: Flutter يكتشف النجاح عبر _successUrlPattern = '/payment/success'
+        // لذلك الـ redirect يجب أن يحتوي هذا المسار بالضبط
+        return redirect(url('/api/payment/success?session_id=mock_' . time()));
+    });
+
+    // مسار الإلغاء — Flutter يكتشف /payment/cancel ويعود لـ /home
+    Route::get('/payment/cancel', function () {
+        return response(
+            '<h3 style="text-align:center;margin-top:40px;font-family:Arial;color:#ef4444">تم إلغاء الدفع</h3>',
+            200,
+            ['Content-Type' => 'text/html; charset=UTF-8']
+        );
+    });
+
+    // مسار النجاح — Flutter يكتشف /payment/success بالـ URL ويتنقل لـ /confirmation
+    // هذا المسار لا يُعالج الدفع (تم ذلك في mock-confirm) بل فقط للـ redirect
+    Route::get('/payment/success', function (Request $request) {
+        return response(
+            '<h3 style="text-align:center;margin-top:40px;font-family:Arial;color:#2d6a4f">تم الدفع بنجاح ✅</h3>',
+            200,
+            ['Content-Type' => 'text/html; charset=UTF-8']
+        );
+    });
+}
+// ───────────────────────────────────────────────────────────
 
 
 // -----------------------------------------------------------
@@ -81,107 +205,116 @@ Route::post('/payment/webhook', [PaymentController::class, 'webhook']);
 // -----------------------------------------------------------
 
 Route::middleware('auth:sanctum')->group(function () {
-
-    // إدارة الملف الشخصي
-    //////////////////////////////////
-    ///////////////////////////////////
-    //////////////////////////////////
-    Route::get('/user', function (Request $request) {
-    $user = $request->user()->load([
-        'subscription.payments',
-    ]);
-
-    $monthNames = [
-        1 => 'يناير', 2 => 'فبراير', 3 => 'مارس', 4 => 'أبريل',
-        5 => 'مايو', 6 => 'يونيو', 7 => 'يوليو', 8 => 'أغسطس',
-        9 => 'سبتمبر', 10 => 'أكتوبر', 11 => 'نوفمبر', 12 => 'ديسمبر',
-    ];
-
-    return response()->json([
-        'id'        => $user->id,
-        'full_name' => $user->full_name,
-        'email'     => $user->email,
-        'phone'     => $user->phone,
-        'joined_at' => $user->created_at->toDateString(),
-
-        'subscription' => $user->subscription ? [
-            'id'             => $user->subscription->id,
-            'annual_amount'  => (float) $user->subscription->annual_amount,
-            'monthly_amount' => (float) $user->subscription->monthly_amount,
-            'start_date'     => $user->subscription->start_date,
-
-            'months' => $user->subscription->payments->map(fn($p) => [
-                'month_number' => $p->month_number,
-                'month_name'   => ($monthNames[$p->month_number] ?? 'شهر') . ' ' . $p->year,
-                'status'       => Payment::getStatus($p->month_number, $p->year, $p->paid_at),
-                'amount' => (float) $p->amount,
-                'paid_at'      => $p->paid_at,
-            ])->values(),
-        ] : null,
-
-        'payment_history' => $user->subscription
-            ? $user->subscription->payments
-                ->filter(fn($p) => $p->paid_at !== null)
-                ->map(fn($p) => [
-                    'id'             => $p->id,
-                    'months'         => [$p->month_number],
-                    'amount' => (float) $p->amount,
-                    'paid_at'        => $p->paid_at,
-                    'receipt_number' => $p->payment_gateway_ref ?? 'REC-' . str_pad($p->id, 6, '0', STR_PAD_LEFT),
-                ])->values()
-            : [],
-    ]);
+   Route::get('/notifications', function (Request $request) {
+    return response()->json(
+        $request->user()
+            ->notifications()
+            ->latest()
+            ->get()
+            ->map(fn($n) => [
+                'id'         => $n->id,
+                'type'       => $n->type,
+                'title'      => $n->data['title'] ?? '',
+                'body'       => $n->data['body'] ?? '',
+                'read_at'    => $n->read_at,
+                'created_at' => $n->created_at,
+            ])
+    );
 });
 
-    ///////////////////////////////////////
-    //////////////////////////////////////
-    //////////////////////////////////////
-    // تحديث رمز إشعارات Firebase
+Route::post('/notifications/{id}/read', function (Request $request, $id) {
+    $request->user()
+        ->notifications()
+        ->where('id', $id)
+        ->update(['read_at' => now()]);
+
+    return response()->json(['message' => 'تم التعليم كمقروء']);
+});
+
+    Route::get('/user', function (Request $request) {
+        $user = $request->user()->load(['subscription.payments']);
+
+        $monthNames = [
+            1 => 'يناير', 2 => 'فبراير', 3 => 'مارس', 4 => 'أبريل',
+            5 => 'مايو', 6 => 'يونيو', 7 => 'يوليو', 8 => 'أغسطس',
+            9 => 'سبتمبر', 10 => 'أكتوبر', 11 => 'نوفمبر', 12 => 'ديسمبر',
+        ];
+
+        return response()->json([
+            'id'        => $user->id,
+            'full_name' => $user->full_name,
+            'email'     => $user->email,
+            'phone'     => $user->phone,
+            'joined_at' => $user->created_at->toDateString(),
+
+            'subscription' => $user->subscription ? [
+                'id'             => $user->subscription->id,
+                'annual_amount'  => (float) $user->subscription->annual_amount,
+                'monthly_amount' => (float) $user->subscription->monthly_amount,
+                'start_date'     => $user->subscription->start_date,
+
+                'months' => $user->subscription->payments->map(fn($p) => [
+                    'month_number' => $p->month_number,
+                    'month_name'   => ($monthNames[$p->month_number] ?? 'شهر') . ' ' . $p->year,
+                    'status'       => Payment::getStatus($p->month_number, $p->year, $p->paid_at),
+                    'amount'       => (float) $p->amount,
+                    'paid_at'      => $p->paid_at,
+                ])->values(),
+            ] : null,
+
+            'payment_history' => $user->subscription
+                ? $user->subscription->payments
+                    ->filter(fn($p) => $p->paid_at !== null)
+                    ->map(fn($p) => [
+                        'id'             => $p->id,
+                        'months'         => [$p->month_number],
+                        'amount'         => (float) $p->amount,
+                        'paid_at'        => $p->paid_at,
+                        'receipt_number' => $p->payment_gateway_ref ?? 'REC-' . str_pad($p->id, 6, '0', STR_PAD_LEFT),
+                    ])->values()
+                : [],
+        ]);
+    });
+
     Route::post('/update-fcm-token', [AuthController::class, 'updateFcmToken']);
 
-    // تسجيل الخروج
     Route::post('/logout', function (Request $request) {
         $request->user()->currentAccessToken()->delete();
         return response()->json(['message' => 'تم تسجيل الخروج بنجاح.'], 200);
     });
 
-    // إدارة الاشتراكات
     Route::prefix('subscription')->group(function () {
-        Route::post('/', [SubscriptionController::class, 'store']); // إنشاء اشتراك (سنوي)
-        Route::get('/', [SubscriptionController::class, 'show']);   // عرض حالة الـ 12 شهراً
+        Route::post('/', [SubscriptionController::class, 'store']);
+        Route::get('/',  [SubscriptionController::class, 'show']);
     });
 
-    // عمليات الدفع
     Route::prefix('payment')->group(function () {
-        Route::post('/initiate', [PaymentController::class, 'initiate']); // بدء عملية دفع لأشهر محددة
+        Route::post('/initiate', [PaymentController::class, 'initiate']);
+        Route::get('/latest-receipt', [PaymentController::class, 'latestReceipt']);
     });
 
-    // مسار جلب العمولة (متاح للمستخدمين والمدير لكي يعرضها التطبيق أثناء الدفع)
     Route::get('/settings/commission', [SettingController::class, 'getCommission']);
 
-
     // -----------------------------------------------------------
-    // 3. مسارات الإدارة - للمدير فقط (Admin Only)
+    // 3. مسارات الإدارة - للمدير فقط
     // -----------------------------------------------------------
 
-    // نستخدم "can:admin-only" التي عرفناها في الـ Gate داخل AppServiceProvider
     Route::middleware('can:admin-only')->prefix('admin')->group(function () {
+        Route::get('/dashboard-stats',    [Admincontroller::class, 'dashboardStats']);
+        Route::get('/subscribers-report', [Admincontroller::class, 'subscribersReport']);
+        Route::get('/fund-summary',       [Admincontroller::class, 'fundSummary']);
+        Route::get('/fund-transfers',     [Admincontroller::class, 'fundTransfers']);
+        Route::post('/fund-transfers',    [FundTransferController::class, 'store']);
+        Route::get('/app-fund',           [AppFundController::class, 'index']);
+        Route::get('/charity-fund',       [CharityFundController::class, 'index']);
+        Route::get('/transfers-history',  [FundTransferController::class, 'index']);
+   Route::get('/subscribers-list', [AdminHistoricalPaymentController::class, 'subscribersList']);
+    Route::get('/subscriber-payments/{userId}', [AdminHistoricalPaymentController::class, 'subscriberPayments']);
+    Route::post('/mark-historical-paid', [AdminHistoricalPaymentController::class, 'markHistoricalPaid']);
+        });
 
-        // عرض أرصدة الصناديق
-        Route::get('/app-fund', [AppFundController::class, 'index']);         // رصيد التطبيق الإلكتروني
-        Route::get('/charity-fund', [CharityFundController::class, 'index']); // رصيد الجمعية المحول
-
-        // إدارة تحويلات الأموال
-        Route::post('/transfer', [FundTransferController::class, 'store']);         // إجراء تحويل جديد للجمعية
-        Route::get('/transfers-history', [FundTransferController::class, 'index']); // سجل جميع التحويلات
-
-    });
-
-    // مسارات المدير (Admin Only) — IsAdmin middleware
     Route::middleware('IsAdmin')->prefix('admin')->group(function () {
-
-        // مسار تعديل العمولة (خاص بالمدير فقط)
         Route::post('/settings/commission', [SettingController::class, 'updateCommission']);
-
+        Route::post('/payments/mark-manual-paid', [PaymentController::class, 'markPreviousMonthsAsPaid']);
     });
 });
