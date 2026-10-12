@@ -20,6 +20,7 @@ return new class extends Migration
         $table->enum('status', ['pending', 'paid', 'overdue'])->default('pending'); // حالة الدفع[cite: 1]
         $table->timestamp('paid_at')->nullable(); // تاريخ الدفع الفعلي[cite: 1]
         $table->string('payment_gateway_ref')->nullable(); // المرجع المالي من بوابة الدفع[cite: 1]
+        $table->string('note')->nullable();
         $table->timestamps();
     });
     }

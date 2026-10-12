@@ -28,63 +28,58 @@ class SubscriptionController extends Controller
     }
 
     // إنشاء اشتراك جديد
-    public function store(Request $request)
-    {
-        $request->validate([
-            'annual_amount' => 'required|numeric|min:12', // أقل مبلغ للاشتراك مثلاً 12 دولار
+   public function store(Request $request)
+{
+    $request->validate([
+        'annual_amount' => 'required|numeric|min:60|max:1200',
+    ], [
+        'annual_amount.required' => 'مبلغ الاشتراك السنوي مطلوب',
+        'annual_amount.numeric'  => 'مبلغ الاشتراك يجب أن يكون رقمًا',
+        'annual_amount.min'      => 'مبلغ الاشتراك السنوي يجب ألا يقل عن 60',
+        'annual_amount.max'      => 'مبلغ الاشتراك السنوي يجب ألا يزيد عن 1200',
+    ]);
+
+    $user = $request->user();
+
+    if (Subscription::where('user_id', $user->id)->where('status', 'active')->exists()) {
+        return response()->json(['message' => 'لديك اشتراك نشط بالفعل'], 400);
+    }
+
+    $monthly_amount = $request->annual_amount / 12;
+    $currentYear = Carbon::now()->year;
+
+    DB::beginTransaction();
+    try {
+        $subscription = Subscription::create([
+            'user_id' => $user->id,
+            'annual_amount' => $request->annual_amount,
+            'monthly_amount' => $monthly_amount,
+            'start_date' => Carbon::now()->toDateString(),
+            'status' => 'active',
         ]);
 
-        $user = $request->user();
-
-        // التأكد من أن المستخدم وثّق حسابه (هاتف)
-        if (!$user->phone_verified_at) {
-            return response()->json(['message' => 'يجب توثيق رقم الهاتف أولاً'], 403);
+        $payments = [];
+        for ($month = 1; $month <= 12; $month++) {
+            $payments[] = [
+                'subscription_id' => $subscription->id,
+                'month_number' => $month,
+                'year' => $currentYear,
+                'amount' => $monthly_amount,
+                'status' => 'pending',
+                'created_at' => Carbon::now(),
+                'updated_at' => Carbon::now(),
+            ];
         }
+        Payment::insert($payments);
 
-        // التأكد من عدم وجود اشتراك مسبق نشط
-        if (Subscription::where('user_id', $user->id)->where('status', 'active')->exists()) {
-            return response()->json(['message' => 'لديك اشتراك نشط بالفعل'], 400);
-        }
-
-        $monthly_amount = $request->annual_amount / 12; // حساب القسط الشهري
-        $currentYear = Carbon::now()->year;
-
-        DB::beginTransaction();
-        try {
-            // 1. إنشاء سجل الاشتراك
-            $subscription = Subscription::create([
-                'user_id' => $user->id,
-                'annual_amount' => $request->annual_amount,
-                'monthly_amount' => $monthly_amount,
-                'start_date' => Carbon::now()->toDateString(),
-                'status' => 'active',
-            ]);
-
-            // 2. توليد 12 سجل دفع تلقائياً لهذه السنة
-            $payments = [];
-            for ($month = 1; $month <= 12; $month++) {
-                $payments[] = [
-                    'subscription_id' => $subscription->id,
-                    'month_number' => $month,
-                    'year' => $currentYear,
-                    'amount' => $monthly_amount,
-                    'status' => 'pending',
-                    'created_at' => Carbon::now(),
-                    'updated_at' => Carbon::now(),
-                ];
-            }
-            Payment::insert($payments);
-
-            DB::commit();
-
-            return response()->json([
-                'message' => 'تم تفعيل الاشتراك بنجاح وتوليد الدفعات',
-                'subscription' => $subscription->load('payments') // إرجاع الاشتراك مع الدفعات
-            ], 201);
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json(['message' => 'حدث خطأ أثناء إنشاء الاشتراك', 'error' => $e->getMessage()], 500);
-        }
+        DB::commit();
+        return response()->json([
+            'message' => 'تم تفعيل الاشتراك بنجاح وتوليد الدفعات',
+            'subscription' => $subscription->load('payments')
+        ], 201);
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return response()->json(['message' => 'حدث خطأ أثناء إنشاء الاشتراك', 'error' => $e->getMessage()], 500);
     }
+}
 }

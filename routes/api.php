@@ -10,11 +10,36 @@ use App\Http\Controllers\AppFundController;
 use App\Http\Controllers\CharityFundController;
 use App\Http\Controllers\FundTransferController;
 use App\Http\Controllers\SettingController;
-use App\Http\Controllers\AdminController;
+use App\Http\Controllers\Admincontroller;
 use App\Http\Controllers\AdminHistoricalPaymentController;
 use App\Models\Payment;
 use App\Models\User;
+Route::get('/test-paddle', function () {
+    $response = \Illuminate\Support\Facades\Http::withHeaders([
+        'Authorization' => 'Bearer ' . config('services.tap.secret_key'),
+        'Content-Type'  => 'application/json',
+    ])->get('https://api.tap.company/v2/charges');
 
+    return response()->json([
+        'status' => $response->status(),
+        'body'   => $response->json(),
+        'key'    => config('services.tap.secret_key'),
+    ]);
+});
+Route::get('/test-admin-notify', function () {
+    $admin = \App\Models\User::where('role', 'admin')->first();
+    
+    $fcmService = app(\App\Services\FCMService::class);
+    
+    $fcmService->sendToDevice(
+        $admin->fcm_token,
+        'تجربة إشعار أدمن',
+        'هذا إشعار تجريبي للأدمن',
+        ['type' => 'test']
+    );
+    
+    return 'تم الإرسال للأدمن: ' . $admin->full_name;
+});
 /*
 |--------------------------------------------------------------------------
 | API Routes - Swaida Go
@@ -180,6 +205,31 @@ if (app()->environment('local')) {
 // -----------------------------------------------------------
 
 Route::middleware('auth:sanctum')->group(function () {
+   Route::get('/notifications', function (Request $request) {
+    return response()->json(
+        $request->user()
+            ->notifications()
+            ->latest()
+            ->get()
+            ->map(fn($n) => [
+                'id'         => $n->id,
+                'type'       => $n->type,
+                'title'      => $n->data['title'] ?? '',
+                'body'       => $n->data['body'] ?? '',
+                'read_at'    => $n->read_at,
+                'created_at' => $n->created_at,
+            ])
+    );
+});
+
+Route::post('/notifications/{id}/read', function (Request $request, $id) {
+    $request->user()
+        ->notifications()
+        ->where('id', $id)
+        ->update(['read_at' => now()]);
+
+    return response()->json(['message' => 'تم التعليم كمقروء']);
+});
 
     Route::get('/user', function (Request $request) {
         $user = $request->user()->load(['subscription.payments']);
@@ -250,10 +300,10 @@ Route::middleware('auth:sanctum')->group(function () {
     // -----------------------------------------------------------
 
     Route::middleware('can:admin-only')->prefix('admin')->group(function () {
-        Route::get('/dashboard-stats',    [AdminController::class, 'dashboardStats']);
-        Route::get('/subscribers-report', [AdminController::class, 'subscribersReport']);
-        Route::get('/fund-summary',       [AdminController::class, 'fundSummary']);
-        Route::get('/fund-transfers',     [AdminController::class, 'fundTransfers']);
+        Route::get('/dashboard-stats',    [Admincontroller::class, 'dashboardStats']);
+        Route::get('/subscribers-report', [Admincontroller::class, 'subscribersReport']);
+        Route::get('/fund-summary',       [Admincontroller::class, 'fundSummary']);
+        Route::get('/fund-transfers',     [Admincontroller::class, 'fundTransfers']);
         Route::post('/fund-transfers',    [FundTransferController::class, 'store']);
         Route::get('/app-fund',           [AppFundController::class, 'index']);
         Route::get('/charity-fund',       [CharityFundController::class, 'index']);

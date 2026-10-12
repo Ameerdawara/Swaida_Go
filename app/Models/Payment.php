@@ -8,7 +8,7 @@ class Payment extends Model
 {
     protected $fillable = [
     'subscription_id', 'month_number', 'year', 'amount', 
-    'status', 'paid_at', 'payment_gateway_ref'
+    'status', 'paid_at', 'payment_gateway_ref','note'
 ];
 
 public function subscription()

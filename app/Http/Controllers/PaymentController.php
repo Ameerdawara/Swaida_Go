@@ -30,7 +30,6 @@ class PaymentController extends Controller
             $title   = 'إشعار دفع جديد 💰';
             $message = "قام {$payerName} بدفع مبلغ " . number_format($totalPaid, 2) . ' دولار.';
 
-            // ── 1. إرسال FCM Push Notification ──────────────────────────────
             if (!empty($admin->fcm_token)) {
                 $fcm    = app(\App\Services\FCMService::class);
                 $result = $fcm->sendToDevice(
@@ -39,7 +38,6 @@ class PaymentController extends Controller
                     $message,
                     ['type' => 'admin_payment_received']
                 );
-
                 Log::info('[FCM] نتيجة إشعار الأدمن', [
                     'success'    => $result ? 'ناجح' : 'فشل',
                     'payer'      => $payerName,
@@ -49,7 +47,6 @@ class PaymentController extends Controller
                 Log::warning('[FCM] توكن الأدمن فارغ.', ['admin_id' => $admin->id]);
             }
 
-            // ── 2. حفظ الإشعار في جدول notifications ────────────────────────
             $admin->notifications()->create([
                 'id'   => \Illuminate\Support\Str::uuid(),
                 'type' => 'admin_payment_received',
@@ -62,19 +59,13 @@ class PaymentController extends Controller
                 ]
             ]);
 
-            Log::info('[DB] تم حفظ الإشعار في قاعدة البيانات', [
-                'admin_id'   => $admin->id,
-                'payer'      => $payerName,
-                'total_paid' => $totalPaid,
-            ]);
-
         } catch (\Exception $e) {
             Log::error('[notifyAdmin] خطأ: ' . $e->getMessage());
         }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Helper: معالجة الدفع الفعلية (مشتركة بين webhook الحقيقي والـ mock)
+    // Helper: معالجة الدفع الفعلية
     // ─────────────────────────────────────────────────────────────────────────
     private function processPayments(array $paymentIds, ?string $gatewayRef = null): array
     {
@@ -90,17 +81,15 @@ class PaymentController extends Controller
         $totalPaid = 0;
 
         foreach ($payments as $payment) {
-            $payment->status               = 'paid';
-            $payment->paid_at              = Carbon::now();
-            $payment->payment_gateway_ref  = $gatewayRef ?? 'mock_' . uniqid();
+            $payment->status              = 'paid';
+            $payment->paid_at             = Carbon::now();
+            $payment->payment_gateway_ref = $gatewayRef ?? 'tap_' . uniqid();
             $payment->save();
-
             $totalPaid += $payment->amount;
         }
 
-        // تحديث صندوق التطبيق
-        $appFund              = AppFund::firstOrCreate(['id' => 1]);
-        $appFund->balance    += $totalPaid;
+        $appFund               = AppFund::firstOrCreate(['id' => 1]);
+        $appFund->balance     += $totalPaid;
         $appFund->last_updated = Carbon::now();
         $appFund->save();
 
@@ -114,106 +103,51 @@ class PaymentController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // createPaddleCheckout
-    // يدعم Paddle Billing v2 (2024+)
-    // المطلوب مسبقاً في Paddle Dashboard:
-    //   1. أنشئ Product → احصل على product_id
-    //   2. أنشئ Price لهذا الـ Product → احصل على price_id
-    //   3. ضع PADDLE_PRICE_ID في .env
+    // createTapCheckout — إنشاء جلسة دفع عبر Tap Payment
     // ─────────────────────────────────────────────────────────────────────────
-    private function createPaddleCheckout(float $amount, array $paymentIds, int $userId): string
+    private function createTapCheckout(float $amount, array $paymentIds, int $userId): string
     {
-        $isSandbox = config('services.paddle.env', 'sandbox') === 'sandbox';
-        $baseUrl   = $isSandbox
-            ? 'https://sandbox-api.paddle.com'
-            : 'https://api.paddle.com';
+        $user = \App\Models\User::find($userId);
 
-        $priceId = config('services.paddle.price_id'); // من .env → PADDLE_PRICE_ID
+        $response = Http::withHeaders([
+            'Authorization' => 'Bearer ' . config('services.tap.secret_key'),
+            'Content-Type'  => 'application/json',
+        ])->post('https://api.tap.company/v2/charges', [
+            'amount'       => round($amount, 2),
+            'currency'     => 'USD',
+            'threeDSecure' => true,
+            'description'  => 'اشتراك - ' . count($paymentIds) . ' شهر',
+            'metadata'     => [
+                'payment_ids' => implode(',', $paymentIds),
+                'user_id'     => $userId,
+            ],
+            'customer' => [
+                'first_name' => $user?->full_name ?? 'مستخدم',
+                'email'      => $user?->email ?? '',
+            ],
+            'source'   => ['id' => 'src_all'],
+            'post'     => ['url' => url('/api/payment/webhook')],
+            'redirect' => ['url' => url('/api/payment/success')],
+        ]);
 
-        // ── الطريقة 1: استخدام Price ID ثابت (الأسهل والأنصح) ──
-        // تُنشئ Price بقيمة ثابتة في Dashboard وتضع الـ ID هنا
-        if ($priceId) {
-            $response = Http::withHeaders([
-                    'Authorization' => 'Bearer ' . config('services.paddle.secret_key'),
-                    'Content-Type'  => 'application/json',
-                ])
-                ->post("{$baseUrl}/transactions", [
-                    'items' => [[
-                        'price_id' => $priceId,
-                        'quantity' => 1,
-                    ]],
-                    'custom_data' => [
-                        'payment_ids' => $paymentIds,
-                        'user_id'     => $userId,
-                    ],
-                    'checkout' => [
-                        'url' => url('/api/payment/success?session_id={checkout.id}'),
-                    ],
-                    'currency_code' => 'USD',
-                ]);
-        } else {
-            // ── الطريقة 2: سعر مخصص (custom price) — بدون Price ID ──
-            // تعمل مع Paddle Billing v2 عبر catalog=false
-            $response = Http::withHeaders([
-                    'Authorization' => 'Bearer ' . config('services.paddle.secret_key'),
-                    'Content-Type'  => 'application/json',
-                ])
-                ->post("{$baseUrl}/transactions", [
-                    'items' => [[
-                        'price' => [
-                            'description' => 'رسوم الاشتراك الشهري',
-                            'product'     => [
-                                'name'        => 'اشتراك شهري',
-                                'tax_category' => 'standard',
-                            ],
-                            'unit_price' => [
-                                'amount'        => (string) round($amount * 100), // بالسنت
-                                'currency_code' => 'USD',
-                            ],
-                            'tax_mode' => 'exclusive',
-                        ],
-                        'quantity' => 1,
-                    ]],
-                    'custom_data' => [
-                        'payment_ids' => $paymentIds,
-                        'user_id'     => $userId,
-                    ],
-                    'checkout' => [
-                        'url' => url('/api/payment/success?session_id={checkout.id}'),
-                    ],
-                    'currency_code' => 'USD',
-                ]);
-        }
-
-        Log::info('Paddle API Response', [
-            'status'    => $response->status(),
-            'body'      => $response->json(),
-            'price_id'  => $priceId ?? 'custom',
-            'sandbox'   => $isSandbox,
+        Log::info('Tap API Response', [
+            'status' => $response->status(),
+            'body'   => $response->json(),
         ]);
 
         if (!$response->successful()) {
-            Log::error('Paddle API Error', [
+            Log::error('Tap Error', [
                 'status' => $response->status(),
                 'body'   => $response->body(),
             ]);
-            throw new \Exception(
-                'فشل الاتصال بـ Paddle: ' . $response->status() . ' — ' . $response->body()
-            );
+            throw new \Exception('فشل Tap: ' . $response->body());
         }
 
-        $json = $response->json();
-
-        // Paddle v2 يُعيد checkout URL هنا
-        $checkoutUrl = $json['data']['checkout']['url']
-            ?? $json['data']['url']
-            ?? null;
+        $json        = $response->json();
+        $checkoutUrl = $json['transaction']['url'] ?? null;
 
         if (!$checkoutUrl) {
-            Log::error('Paddle: لم يرجع checkout URL', ['response' => $json]);
-            throw new \Exception(
-                'لم يتم الحصول على رابط الدفع من Paddle. الاستجابة: ' . json_encode($json)
-            );
+            throw new \Exception('لم يرجع checkout URL من Tap: ' . json_encode($json));
         }
 
         return $checkoutUrl;
@@ -256,7 +190,6 @@ class PaymentController extends Controller
         // ── Mock Mode للتطوير المحلي ──────────────────────────────────────────
         if (app()->environment('local')) {
             $mockUrl = url('/api/payment/mock-success?payment_ids=' . implode(',', $paymentIds));
-
             return response()->json([
                 'message'      => '[MOCK] تم حساب إجمالي الرسوم',
                 'details'      => [
@@ -274,13 +207,13 @@ class PaymentController extends Controller
         // ─────────────────────────────────────────────────────────────────────
 
         try {
-            $checkoutUrl = $this->createPaddleCheckout(
+            $checkoutUrl = $this->createTapCheckout(
                 amount: $totalToPay,
                 paymentIds: $paymentIds,
                 userId: $user->id
             );
         } catch (\Exception $e) {
-            Log::error('Paddle Checkout Error', ['error' => $e->getMessage()]);
+            Log::error('Tap Checkout Error', ['error' => $e->getMessage()]);
             return response()->json([
                 'message' => 'فشل إنشاء جلسة الدفع: ' . $e->getMessage(),
             ], 500);
@@ -302,7 +235,7 @@ class PaymentController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // mockSuccess — يحاكي نجاح الدفع في بيئة local بدون Paddle
+    // mockSuccess — يحاكي نجاح الدفع في بيئة local
     // ─────────────────────────────────────────────────────────────────────────
     public function mockSuccess(Request $request)
     {
@@ -322,11 +255,10 @@ class PaymentController extends Controller
             DB::commit();
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('[MOCK] فشل معالجة الدفع: ' . $e->getMessage());
-            return response()->json(['message' => 'فشل معالجة الدفع', 'error' => $e->getMessage()], 500);
+            Log::error('[MOCK] فشل: ' . $e->getMessage());
+            return response()->json(['message' => 'فشل', 'error' => $e->getMessage()], 500);
         }
 
-        // إرسال إشعار الأدمن + حفظه في DB بعد commit ✅
         $this->notifyAdmin($result['total_paid'], $result['payer_name']);
 
         return response()->json([
@@ -337,62 +269,46 @@ class PaymentController extends Controller
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // webhook — استقبال تأكيد الدفع من Paddle
+    // webhook — استقبال تأكيد الدفع من Tap
     // ─────────────────────────────────────────────────────────────────────────
     public function webhook(Request $request)
-    {
-        Log::info('[Webhook] طلب وارد من Paddle', [
-            'ip'      => $request->ip(),
-            'headers' => $request->headers->all(),
-        ]);
+{
+    Log::info('[Tap Webhook] طلب وارد', [
+        'ip'      => $request->ip(),
+        'body'    => $request->all(),
+        'headers' => $request->headers->all(),
+    ]);
 
-        $signature = $request->header('Paddle-Signature');
-        $body      = $request->getContent();
+    $status     = $request->input('status');
+    $id         = $request->input('id');
+    $metadata   = $request->input('metadata', []);
+    $paymentIds = array_filter(explode(',', $metadata['payment_ids'] ?? ''));
 
-        $parts = [];
-        foreach (explode(';', $signature) as $part) {
-            [$k, $v] = explode('=', $part, 2);
-            $parts[$k] = $v;
-        }
-
-        $ts     = $parts['ts'] ?? '';
-        $h1     = $parts['h1'] ?? '';
-        $signed = $ts . ':' . $body;
-
-        $expected = hash_hmac('sha256', $signed, config('services.paddle.webhook_secret'));
-
-        if (!hash_equals($expected, $h1)) {
-            Log::warning('[Webhook] توقيع غير صحيح', ['received' => $h1]);
-            return response()->json(['message' => 'توقيع غير صحيح'], 401);
-        }
-
-        $paymentIds = $request->input('data.custom_data.payment_ids');
-        $gatewayRef = $request->input('data.id');
-
-        if (!$paymentIds || !is_array($paymentIds)) {
-            Log::warning('[Webhook] payment_ids مفقودة أو غير صحيحة');
-            return response()->json(['message' => 'بيانات غير مكتملة'], 400);
-        }
-
-        DB::beginTransaction();
-        try {
-            $result = $this->processPayments($paymentIds, $gatewayRef);
-            DB::commit();
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('[Webhook] فشل معالجة الدفع: ' . $e->getMessage());
-            return response()->json(['message' => 'فشل معالجة الدفع', 'error' => $e->getMessage()], 500);
-        }
-
-        // إرسال إشعار الأدمن + حفظه في DB بعد commit ✅
-        $this->notifyAdmin($result['total_paid'], $result['payer_name']);
-
-        return response()->json(['message' => 'تم معالجة الدفع بنجاح وتحديث الصندوق'], 200);
+    if ($status !== 'CAPTURED') {
+        Log::info('[Tap Webhook] تجاهل', ['status' => $status]);
+        return response()->json(['message' => 'تم الاستقبال'], 200);
     }
 
+    if (empty($paymentIds)) {
+        return response()->json(['message' => 'بيانات ناقصة'], 400);
+    }
+
+    DB::beginTransaction();
+    try {
+        $result = $this->processPayments(array_map('intval', $paymentIds), $id);
+        DB::commit();
+    } catch (\Exception $e) {
+        DB::rollBack();
+        Log::error('[Tap Webhook] فشل: ' . $e->getMessage());
+        return response()->json(['message' => 'فشل'], 500);
+    }
+
+    $this->notifyAdmin($result['total_paid'], $result['payer_name']);
+    return response()->json(['message' => 'تم بنجاح'], 200);
+}
+
     // ─────────────────────────────────────────────────────────────────────────
-    // latestReceipt — آخر دفعة مكتملة للمستخدم الحالي (لصفحة التأكيد)
-    // GET /api/payment/latest-receipt
+    // latestReceipt — آخر دفعة مكتملة للمستخدم الحالي
     // ─────────────────────────────────────────────────────────────────────────
     public function latestReceipt(Request $request)
     {
@@ -403,7 +319,6 @@ class PaymentController extends Controller
             return response()->json(['message' => 'لا يوجد اشتراك'], 404);
         }
 
-        // آخر دفعة مكتملة مرتبة بوقت الدفع
         $payment = Payment::where('subscription_id', $subscription->id)
             ->whereNotNull('paid_at')
             ->orderBy('paid_at', 'desc')

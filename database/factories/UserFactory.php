@@ -16,30 +16,21 @@ class UserFactory extends Factory
      *
      * @return array<string, mixed>
      */
-    public function definition(): array
-    {
-        return [
-            'full_name' => fake()->name(),
-
-            'email' => fake()->unique()->safeEmail(),
-
-            'phone' => fake()->unique()->numerify('09########'),
-
-            'email_verified_at' => now(),
-
-            'phone_verified_at' => now(),
-
-            'password' => Hash::make('password123'),
-
-            'role' => 'subscriber',
-
-            'fcm_token' => null,
-
-            'phone_otp' => null,
-
-            'phone_otp_expires_at' => null,
-        ];
-    }
+   public function definition(): array
+{
+    return [
+        'full_name' => $this->faker->name(),
+        'email' => $this->faker->unique()->safeEmail(),
+        'phone' => $this->faker->unique()->numerify('09########'),
+        'email_verified_at' => now(),
+        'phone_verified_at' => now(),
+        'password' => Hash::make('password123'),
+        'role' => 'subscriber',
+        'fcm_token' => null,
+        'phone_otp' => null,
+        'phone_otp_expires_at' => null,
+    ];
+}
 
     /**
      * Indicate that the model's email address should be unverified.

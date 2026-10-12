@@ -174,12 +174,18 @@ $monthlyAmountToSave = $request->custom_amount ?? ($subscription ? $subscription
             }
 
             // تحديث رصيد صندوق التطبيق
-            if ($totalAmount > 0) {
-                $appFund = AppFund::firstOrCreate(['id' => 1]);
-                $appFund->balance += $totalAmount;
-                $appFund->last_updated = Carbon::now();
-                $appFund->save();
-            }
+           // تحديث رصيد صندوق التطبيق (بدون مشاكل mass assignment على id)
+if ($totalAmount > 0) {
+    $appFund = AppFund::find(1);
+    if (!$appFund) {
+        $appFund = new AppFund();
+        $appFund->id = 1;
+        $appFund->balance = 0;
+    }
+    $appFund->balance += $totalAmount;
+    $appFund->last_updated = Carbon::now();
+    $appFund->save();
+}
 
             DB::commit();
 
@@ -191,12 +197,14 @@ $monthlyAmountToSave = $request->custom_amount ?? ($subscription ? $subscription
                 'total_amount'  => round($totalAmount, 2),
             ], 200);
 
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return response()->json([
-                'message' => 'فشل تسجيل المدفوعات',
-                'error'   => $e->getMessage(),
-            ], 500);
-        }
+        } catch (\Throwable $e) {
+    DB::rollBack();
+    return response()->json([
+        'message' => 'فشل تسجيل المدفوعات',
+        'error'   => $e->getMessage(),
+        'file'    => $e->getFile(),
+        'line'    => $e->getLine(),
+    ], 500);
+}
     }
 }

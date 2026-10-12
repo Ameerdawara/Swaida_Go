@@ -9,8 +9,8 @@ use Symfony\Component\Mime\Address;
 
 use Illuminate\Support\Facades\Schedule;
 
-// تشغيل الفحص كل 5 دقائق من أجل التجربة
-Schedule::command('payments:check-overdue')->everyFiveMinutes();
+
+Schedule::command('payments:check-overdue')->dailyAt('12:00');
 Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
